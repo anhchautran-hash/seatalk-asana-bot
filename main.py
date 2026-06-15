@@ -209,15 +209,16 @@ async def seatalk_webhook(
         return {"challenge": payload["challenge"]}
 
     # Xử lý tin nhắn
+    event_type = payload.get("event_type", "")
     event = payload.get("event", {})
-    event_type = event.get("type")
 
-    if event_type != "receive_message":
+    if event_type not in ("receive_message", "new_mentioned_message_received_from_group_chat"):
         return {"ok": True}
 
     message = event.get("message", {})
-    text = message.get("content", {}).get("text", "")
-    group_id = event.get("group", {}).get("id")
+    # SeaTalk gửi plain_text hoặc content.text
+    text = message.get("plain_text", "") or message.get("content", {}).get("text", "")
+    group_id = event.get("group", {}).get("group_id", "") or event.get("group", {}).get("id", "")
     sender_name = event.get("sender", {}).get("name", "Thành viên")
 
     if not text or not group_id:
