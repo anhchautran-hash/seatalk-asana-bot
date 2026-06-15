@@ -516,8 +516,7 @@ async def seatalk_webhook(
         msg = (
             f"✅ Task đã được tạo!\n"
             f"📌 {task_name}\n"
-            f"📂 Section: {section_display}\n"
-            f"🙋 Tạo bởi: {sender_name}"
+            f"📂 Section: {section_display}"
             f"{assignee_line}"
             f"{description_line}\n"
             f"🔗 {task_url}"
