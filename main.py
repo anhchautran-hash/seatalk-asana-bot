@@ -177,29 +177,45 @@ MESSAGE_EVENT_TYPES = {
 }
 
 
+def safe_str(val) -> str:
+    """Đảm bảo giá trị là string thuần, không phải dict/list."""
+    if isinstance(val, str):
+        return val
+    if isinstance(val, dict):
+        # Thử các key phổ biến trong object text
+        for k in ("text", "content", "plain_text", "value"):
+            if isinstance(val.get(k), str):
+                return val[k]
+        return json.dumps(val, ensure_ascii=False)
+    return str(val) if val else ""
+
+
 def extract_text_and_group(event: dict) -> tuple[str, str]:
     """Trích xuất text và group_id từ event — thử nhiều cấu trúc JSON khác nhau."""
     message = event.get("message", {})
 
-    # Text
+    # Text — mỗi field đều qua safe_str để tránh dict
     text = (
-        message.get("plain_text")
-        or message.get("content", {}).get("text")
-        or message.get("text")
-        or event.get("text")
+        safe_str(message.get("plain_text"))
+        or safe_str(message.get("content", {}).get("text") if isinstance(message.get("content"), dict) else message.get("content"))
+        or safe_str(message.get("text"))
+        or safe_str(event.get("text"))
         or ""
     )
 
     # Group ID
     group = event.get("group", {})
+    if not isinstance(group, dict):
+        group = {}
     group_id = (
-        group.get("group_id")
-        or group.get("id")
-        or event.get("group_id")
-        or event.get("chat", {}).get("id")
+        safe_str(group.get("group_id"))
+        or safe_str(group.get("id"))
+        or safe_str(event.get("group_id"))
+        or safe_str(event.get("chat", {}).get("id") if isinstance(event.get("chat"), dict) else None)
         or ""
     )
 
+    log.info("extract_text_and_group → text=%r, group_id=%r", text, group_id)
     return text, group_id
 
 
