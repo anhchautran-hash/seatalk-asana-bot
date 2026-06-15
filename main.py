@@ -5,11 +5,6 @@ Khi thành viên gõ trong group SeaTalk:
     !task [Section] Nội dung task
 
 Bot sẽ tự động tạo task đó vào đúng section trong Asana project Partnership.
-
-Ví dụ:
-    !task [Lotte] Hoàn thiện hợp đồng tháng 7
-    !task [realme] Follow up testing timeline
-    !task [Khác] Nghiên cứu đối tác mới
 """
 
 import hashlib
@@ -17,7 +12,6 @@ import hmac
 import json
 import logging
 import time
-
 import re
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -30,19 +24,17 @@ SEATALK_APP_SECRET = "g0d_-DJAQvRuL1QV8MXNies02WcU7K3U"
 ASANA_TOKEN      = "2/1211043881249289/1215711068523662:623ea8a12e256d9c895e6a6de023ed29"
 ASANA_PROJECT_ID = "1215522694635240"
 
-# Map tên section (gõ trong chat) → Asana section GID
-# Bạn cần điền GID thực tế — xem hướng dẫn bên dưới
 SECTION_MAP = {
-    "realme":   "",   # điền GID section realme
-    "lotte":    "",   # điền GID section Lotte
-    "ott":      "",   # điền GID section OTT
-    "gyak":     "",   # điền GID section Gyak
-    "goodtime": "",   # điền GID section Goodtime
-    "shopee":   "",   # điền GID section Shopee
-    "pnj":      "",   # điền GID section PNJ
-    "mixue":    "",   # điền GID section Mixue
-    "khác":     "",   # điền GID section Khác
-    "khac":     "",   # alias không dấu
+    "realme":   "",
+    "lotte":    "",
+    "ott":      "",
+    "gyak":     "",
+    "goodtime": "",
+    "shopee":   "",
+    "pnj":      "",
+    "mixue":    "",
+    "khác":     "",
+    "khac":     "",
 }
 
 # ─── Setup ───────────────────────────────────────────────────────────────────
@@ -52,14 +44,12 @@ log = logging.getLogger(__name__)
 
 app = FastAPI(title="SeaTalk–Asana Bot")
 
-# Cache token SeaTalk (hết hạn sau ~2h)
 _seatalk_token_cache = {"token": None, "expires_at": 0}
 
 
 # ─── SeaTalk helpers ─────────────────────────────────────────────────────────
 
 def get_seatalk_token() -> str:
-    """Lấy access token từ SeaTalk (có cache)."""
     now = time.time()
     if _seatalk_token_cache["token"] and now < _seatalk_token_cache["expires_at"]:
         return _seatalk_token_cache["token"]
@@ -75,14 +65,13 @@ def get_seatalk_token() -> str:
     expires_in = data.get("expire", 7200)
 
     _seatalk_token_cache["token"] = token
-    _seatalk_token_cache["expires_at"] = now + expires_in - 60  # trừ 1 phút buffer
+    _seatalk_token_cache["expires_at"] = now + expires_in - 60
 
     log.info("SeaTalk token refreshed")
     return token
 
 
 def verify_seatalk_signature(body: bytes, timestamp: str, signature: str) -> bool:
-    """Xác thực request đến từ SeaTalk (không phải giả mạo)."""
     message = timestamp + "\n" + body.decode("utf-8")
     expected = hmac.new(
         SEATALK_APP_SECRET.encode(),
@@ -93,7 +82,6 @@ def verify_seatalk_signature(body: bytes, timestamp: str, signature: str) -> boo
 
 
 def send_seatalk_group_message(group_id: str, text: str):
-    """Gửi tin nhắn vào group SeaTalk."""
     token = get_seatalk_token()
     resp = httpx.post(
         "https://openapi.seatalk.io/messaging/v2/send_group_message",
@@ -106,12 +94,13 @@ def send_seatalk_group_message(group_id: str, text: str):
     )
     if resp.status_code != 200:
         log.error("SeaTalk send failed: %s", resp.text)
+    else:
+        log.info("SeaTalk message sent to group %s", group_id)
 
 
 # ─── Asana helpers ───────────────────────────────────────────────────────────
 
 def get_asana_sections() -> dict:
-    """Lấy tất cả sections của project và trả về dict {tên_lower: gid}."""
     resp = httpx.get(
         f"https://app.asana.com/api/1.0/projects/{ASANA_PROJECT_ID}/sections",
         headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
@@ -121,11 +110,11 @@ def get_asana_sections() -> dict:
     sections = {}
     for s in resp.json()["data"]:
         sections[s["name"].lower()] = s["gid"]
+    log.info("Loaded sections: %s", list(sections.keys()))
     return sections
 
 
 def create_asana_task(task_name: str, section_gid: str | None) -> dict:
-    """Tạo task mới trong Asana."""
     payload = {
         "data": {
             "name": task_name,
@@ -141,14 +130,14 @@ def create_asana_task(task_name: str, section_gid: str | None) -> dict:
     resp.raise_for_status()
     task = resp.json()["data"]
 
-    # Move vào đúng section nếu có
     if section_gid:
-        httpx.post(
+        move_resp = httpx.post(
             f"https://app.asana.com/api/1.0/sections/{section_gid}/addTask",
             headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
             json={"data": {"task": task["gid"]}},
             timeout=10,
         )
+        log.info("Move to section result: %s", move_resp.status_code)
 
     return task
 
@@ -156,24 +145,15 @@ def create_asana_task(task_name: str, section_gid: str | None) -> dict:
 # ─── Parse tin nhắn ──────────────────────────────────────────────────────────
 
 def parse_task_command(text: str) -> tuple[str | None, str | None]:
-    """
-    Parse lệnh !task từ tin nhắn.
-    Trả về (section_name, task_name) hoặc (None, None) nếu không phải lệnh task.
-
-    Ví dụ:
-        "!task [Lotte] Hoàn thiện hợp đồng" → ("lotte", "Hoàn thiện hợp đồng")
-        "!task Nghiên cứu đối tác"           → (None, "Nghiên cứu đối tác")  → vào Khác
-        "xin chào mọi người"                  → (None, None)  → bỏ qua
-    """
     text = text.strip()
-    # Bỏ @mention ở đầu nếu có (ví dụ: "@AsaPNS !task ...")
-    text = re.sub(r'^@\S+\s*', '', text).strip()
+    # Bỏ tất cả @mention ở đầu (có thể nhiều mention)
+    text = re.sub(r'^(@\S+\s*)+', '', text).strip()
+
     if not text.lower().startswith("!task"):
         return None, None
 
-    content = text[5:].strip()  # bỏ "!task"
+    content = text[5:].strip()
 
-    # Có [Section] không?
     if content.startswith("["):
         end = content.find("]")
         if end != -1:
@@ -181,11 +161,47 @@ def parse_task_command(text: str) -> tuple[str | None, str | None]:
             task_name = content[end + 1:].strip()
             return section, task_name
 
-    # Không có section → gán vào "Khác"
     return "khác", content
 
 
 # ─── Webhook endpoint ─────────────────────────────────────────────────────────
+
+# Tất cả event type SeaTalk có thể gửi khi có tin nhắn
+MESSAGE_EVENT_TYPES = {
+    "receive_message",
+    "new_mentioned_message_received_from_group_chat",
+    "group_message",
+    "message",
+    "bot_mentioned",
+    "mention",
+}
+
+
+def extract_text_and_group(event: dict) -> tuple[str, str]:
+    """Trích xuất text và group_id từ event — thử nhiều cấu trúc JSON khác nhau."""
+    message = event.get("message", {})
+
+    # Text
+    text = (
+        message.get("plain_text")
+        or message.get("content", {}).get("text")
+        or message.get("text")
+        or event.get("text")
+        or ""
+    )
+
+    # Group ID
+    group = event.get("group", {})
+    group_id = (
+        group.get("group_id")
+        or group.get("id")
+        or event.get("group_id")
+        or event.get("chat", {}).get("id")
+        or ""
+    )
+
+    return text, group_id
+
 
 @app.post("/webhook")
 async def seatalk_webhook(
@@ -194,63 +210,70 @@ async def seatalk_webhook(
     x_seatalk_signature: str = Header(None),
 ):
     body = await request.body()
-
-    # Xác thực chữ ký (bỏ comment dòng dưới khi production)
-    # if not verify_seatalk_signature(body, x_seatalk_timestamp, x_seatalk_signature):
-    #     raise HTTPException(status_code=401, detail="Invalid signature")
-
     payload = json.loads(body)
-    log.info("Received: %s", json.dumps(payload, ensure_ascii=False))
 
-    # SeaTalk gửi challenge khi verify URL — phải trả về ngay
+    # LOG TOÀN BỘ PAYLOAD để debug
+    log.info("=== WEBHOOK RECEIVED ===")
+    log.info("Payload: %s", json.dumps(payload, ensure_ascii=False, indent=2))
+
+    # Challenge verification
     if payload.get("event_type") == "event_verification":
         challenge = payload.get("event", {}).get("seatalk_challenge", "")
+        log.info("Challenge response: %s", challenge)
         return {"seatalk_challenge": challenge}
     if "seatalk_challenge" in payload:
         return {"seatalk_challenge": payload["seatalk_challenge"]}
     if "challenge" in payload:
         return {"challenge": payload["challenge"]}
 
-    # Xử lý tin nhắn
     event_type = payload.get("event_type", "")
     event = payload.get("event", {})
 
-    if event_type not in ("receive_message", "new_mentioned_message_received_from_group_chat"):
+    log.info("Event type: [%s]", event_type)
+
+    # Xử lý tất cả event type liên quan đến message
+    # Nếu event_type không rõ, vẫn thử parse nếu có text
+    text, group_id = extract_text_and_group(event)
+
+    # Fallback: nếu event_type không trong danh sách biết,
+    # vẫn thử xử lý nếu tìm thấy text có !task
+    is_known_message_event = event_type in MESSAGE_EVENT_TYPES
+    has_task_command = "!task" in text.lower()
+
+    if not is_known_message_event and not has_task_command:
+        log.info("Skipping event_type=%s (no !task found)", event_type)
         return {"ok": True}
 
-    message = event.get("message", {})
-    # SeaTalk gửi plain_text hoặc content.text
-    text = message.get("plain_text", "") or message.get("content", {}).get("text", "")
-    group_id = event.get("group", {}).get("group_id", "") or event.get("group", {}).get("id", "")
     sender_name = event.get("sender", {}).get("name", "Thành viên")
 
+    log.info("Text: [%s] | Group: [%s] | Sender: [%s]", text, group_id, sender_name)
+
     if not text or not group_id:
+        log.warning("Missing text or group_id — skipping")
         return {"ok": True}
 
-    # Parse lệnh
     section_key, task_name = parse_task_command(text)
 
     if task_name is None:
-        # Không phải lệnh !task → bỏ qua
+        log.info("Not a !task command, ignoring")
         return {"ok": True}
 
     if not task_name:
         send_seatalk_group_message(group_id, "⚠️ Vui lòng nhập tên task. Ví dụ: !task [Lotte] Tên task")
         return {"ok": True}
 
-    # Tìm section GID
+    log.info("Parsed: section=%s, task=%s", section_key, task_name)
+
     try:
         live_sections = get_asana_sections()
-        # Tìm theo key người dùng gõ
         section_gid = live_sections.get(section_key)
         section_display = section_key.capitalize() if section_key else "Khác"
 
         if not section_gid:
-            # Thử tìm section Khác làm fallback
+            log.warning("Section [%s] not found, falling back to Khác", section_key)
             section_gid = live_sections.get("khác") or live_sections.get("khac")
             section_display = "Khác"
 
-        # Tạo task
         task = create_asana_task(task_name, section_gid)
         task_url = f"https://app.asana.com/0/{ASANA_PROJECT_ID}/{task['gid']}"
 
@@ -265,7 +288,7 @@ async def seatalk_webhook(
         log.info("Task created: %s in section %s", task_name, section_display)
 
     except Exception as e:
-        log.error("Error creating task: %s", e)
+        log.error("Error creating task: %s", e, exc_info=True)
         send_seatalk_group_message(group_id, f"❌ Lỗi khi tạo task: {str(e)}")
 
     return {"ok": True}
