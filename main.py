@@ -23,6 +23,7 @@ SEATALK_APP_SECRET = "g0d_-DJAQvRuL1QV8MXNies02WcU7K3U"
 
 ASANA_TOKEN      = "2/1211043881249289/1215711068523662:623ea8a12e256d9c895e6a6de023ed29"
 ASANA_PROJECT_ID  = "1215522694635240"
+ASANA_DETAILS_FIELD_GID = "1215581143850080"  # Custom field "Details"
 
 # Workspace ID — tự động lấy từ project khi khởi động
 _asana_workspace_id_cache = {"gid": None}
@@ -196,7 +197,9 @@ def create_asana_task(task_name: str, section_gid: str | None, assignee_gid: str
     if assignee_gid:
         payload["data"]["assignee"] = assignee_gid
     if description:
-        payload["data"]["notes"] = description
+        payload["data"]["custom_fields"] = {
+            ASANA_DETAILS_FIELD_GID: description
+        }
     resp = httpx.post(
         "https://app.asana.com/api/1.0/tasks",
         headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
