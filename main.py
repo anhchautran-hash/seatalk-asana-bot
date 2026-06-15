@@ -28,6 +28,7 @@ ASANA_DETAILS_FIELD_GID = "1215581143850080"  # Custom field "Details"
 
 # Map tên SeaTalk → email Asana (để assign task chính xác)
 MEMBER_MAP = {
+    # Tên SeaTalk → email Asana
     "châu trần":              "anhchau.tran@garena.vn",
     "chau tran":              "anhchau.tran@garena.vn",
     "châu trần 0961103256":   "anhchau.tran@garena.vn",
@@ -37,6 +38,9 @@ MEMBER_MAP = {
     "nguyễn trúc mai anh":    "maianh.nguyentruc_ctv@garena.vn",
     "nguyen truc mai anh":    "maianh.nguyentruc_ctv@garena.vn",
     "mai anh":                "maianh.nguyentruc_ctv@garena.vn",
+    # seatalk_id → email (dùng cho @me với External user)
+    "9251829263":             "anhchau.tran@garena.vn",      # Châu Trần
+    "1294552826":             "tuongclk@gmail.com",           # Khánh Tường
 }
 
 # Workspace ID — tự động lấy từ project khi khởi động
@@ -272,8 +276,16 @@ def create_asana_task(task_name: str, section_gid: str | None, assignee_gid: str
 def parse_task_command(text: str) -> tuple[str | None, str | None, str | None, str | None]:
     """
     Parse lệnh !task. Trả về (section, task_name, assignee_name, description).
-    Ví dụ: "@AsaPNS !task [Lotte] Tên task - @Nguyễn Trúc Mai Anh | Nội dung chi tiết"
-           → ("lotte", "Tên task", "nguyễn trúc mai anh", "Nội dung chi tiết")
+
+    Cú pháp mới (dùng /):
+        @AsaPNS !task Section / Tên task / @Assignee / Ghi chú
+    Ví dụ:
+        @AsaPNS !task Lotte / Cập nhật hợp đồng / @Mai Anh / gửi trước 5h
+        @AsaPNS !task Gyak / Follow up / @me
+        @AsaPNS !task Khác / Nghiên cứu đối tác
+
+    Cú pháp cũ vẫn tương thích:
+        @AsaPNS !task [Lotte] Tên task - @Mai Anh | Ghi chú
     """
     text = text.strip()
     # Bỏ tất cả @mention ở đầu (bot mention)
@@ -284,7 +296,22 @@ def parse_task_command(text: str) -> tuple[str | None, str | None, str | None, s
 
     content = text[5:].strip()
 
-    # Parse section
+    # Phát hiện cú pháp mới: có dấu /
+    if "/" in content:
+        parts = [p.strip() for p in content.split("/")]
+        section = parts[0].lower() if len(parts) > 0 else "khác"
+        task_name = parts[1] if len(parts) > 1 else ""
+        assignee_raw = parts[2] if len(parts) > 2 else None
+        description = parts[3] if len(parts) > 3 else None
+
+        # Strip @ khỏi assignee nếu có
+        assignee_name = None
+        if assignee_raw:
+            assignee_name = re.sub(r'^@', '', assignee_raw.strip())
+
+        return section, task_name, assignee_name, description
+
+    # Cú pháp cũ: [Section] Tên - @Assignee | Ghi chú
     section = "khác"
     if content.startswith("["):
         end = content.find("]")
@@ -292,14 +319,12 @@ def parse_task_command(text: str) -> tuple[str | None, str | None, str | None, s
             section = content[1:end].strip().lower()
             content = content[end + 1:].strip()
 
-    # Parse description: tìm " | nội dung" ở cuối
     description = None
     pipe_match = re.search(r'\s*\|\s*(.+)$', content)
     if pipe_match:
         description = pipe_match.group(1).strip()
         content = content[:pipe_match.start()].strip()
 
-    # Parse assignee: tìm " - @tên"
     assignee_name = None
     assignee_match = re.search(r'\s*-\s*@(.+)$', content)
     if assignee_match:
@@ -409,9 +434,13 @@ async def seatalk_webhook(
     # Sender info nằm trong message.sender (theo payload thực tế của SeaTalk)
     message_obj = event.get("message", {})
     sender_obj = message_obj.get("sender", {}) or event.get("sender", {})
+    sender_seatalk_id = str(sender_obj.get("seatalk_id", "") or "")
     sender_name = sender_obj.get("name", "") or event.get("sender", {}).get("name", "") or "Thành viên"
     sender_email = sender_obj.get("email", "") or event.get("sender", {}).get("email", "")
-    log.info("Sender: name=%s, email=%s", sender_name, sender_email)
+    # Nếu tên vẫn là mặc định, thử lookup từ seatalk_id
+    if sender_name == "Thành viên" and sender_seatalk_id and sender_seatalk_id in MEMBER_MAP:
+        sender_email = MEMBER_MAP[sender_seatalk_id]
+    log.info("Sender: name=%s, email=%s, seatalk_id=%s", sender_name, sender_email, sender_seatalk_id)
 
     log.info("Text: [%s] | Group: [%s] | Sender: [%s]", text, group_id, sender_name)
 
@@ -425,7 +454,7 @@ async def seatalk_webhook(
         try:
             live_sections = get_asana_sections()
             section_list = "\n".join(f"  • {name.capitalize()}" for name in live_sections.keys())
-            send_seatalk_group_message(group_id, f"📂 Danh sách sections:\n{section_list}\n\nCú pháp: !task [Section] Tên task - @Assignee | Details")
+            send_seatalk_group_message(group_id, f"📂 Danh sách sections:\n{section_list}\n\nCú pháp: !task Section / Tên task / @Assignee / Ghi chú\nVí dụ: !task Lotte / Cập nhật HĐ / @Mai Anh / gửi trước 5h")
         except Exception as e:
             send_seatalk_group_message(group_id, f"❌ Lỗi: {str(e)}")
         return {"ok": True}
