@@ -1,5 +1,5 @@
-# daily_task_report.py
-import os, requests
+import os
+import requests
 from datetime import datetime
 
 ASANA_TOKEN = os.environ["ASANA_TOKEN"]
@@ -23,18 +23,7 @@ def is_low_priority(task):
         if cf.get("name") == "Priority":
             return (cf.get("display_value") or "").lower() == "low"
     return False
-if __name__ == "__main__":
-    all_tasks = get_tasks()
-    print(f"Tổng task lấy được từ Asana: {len(all_tasks)}")  # thêm dòng này
-    
-    filtered = [t for t in all_tasks if not is_low_priority(t)]
-    print(f"Sau khi lọc Priority Low: {len(filtered)}")      # thêm dòng này
-    
-    if filtered:
-        send_report(filtered)
-        print(f"Sent {len(filtered)} tasks")
-    else:
-        print("No tasks to report")
+
 def send_report(tasks):
     today = datetime.today().strftime("%d/%m/%Y")
     lines = [f"📋 *Daily Tasks — {today}*", f"Tổng: {len(tasks)} task đang mở\n"]
@@ -42,9 +31,21 @@ def send_report(tasks):
         assignee = (t.get("assignee") or {}).get("name", "Unassigned")
         due = t.get("due_on") or "—"
         lines.append(f"• {t['name']}\n  👤 {assignee}  📅 {due}")
-    
+
     r = requests.post(SEATALK_WEBHOOK, json={
         "tag": "text",
         "text": {"content": "\n".join(lines)}
     })
-    print(f"SeaTalk response: {r.status_code} - {r.text}")  # thêm dòng này
+    print(f"SeaTalk response: {r.status_code} - {r.text}")
+
+if __name__ == "__main__":
+    all_tasks = get_tasks()
+    print(f"Tổng task lấy được từ Asana: {len(all_tasks)}")
+
+    filtered = [t for t in all_tasks if not is_low_priority(t)]
+    print(f"Sau khi lọc Priority Low: {len(filtered)}")
+
+    if filtered:
+        send_report(filtered)
+    else:
+        print("No tasks to report")
