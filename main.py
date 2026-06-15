@@ -380,6 +380,7 @@ async def seatalk_webhook(
         return {"ok": True}
 
     sender_name = event.get("sender", {}).get("name", "Thành viên")
+    sender_email = event.get("sender", {}).get("email", "")
 
     log.info("Text: [%s] | Group: [%s] | Sender: [%s]", text, group_id, sender_name)
 
@@ -431,11 +432,20 @@ async def seatalk_webhook(
         assignee_gid = None
         assignee_display = None
         if assignee_name:
-            assignee_gid = find_asana_user(assignee_name)
-            if assignee_gid:
-                assignee_display = assignee_name.title()
+            # @me → tự assign cho người gửi
+            if assignee_name.lower() == "me":
+                if sender_email:
+                    assignee_gid = find_asana_user(sender_email)
+                    assignee_display = sender_name
+                    log.info("@me resolved to sender: %s (%s)", sender_name, sender_email)
+                else:
+                    log.warning("@me used but sender email is empty")
             else:
-                log.warning("Could not find assignee: %s", assignee_name)
+                assignee_gid = find_asana_user(assignee_name)
+                if assignee_gid:
+                    assignee_display = assignee_name.title()
+                else:
+                    log.warning("Could not find assignee: %s", assignee_name)
 
         task = create_asana_task(task_name, section_gid, assignee_gid, description)
         task_url = f"https://app.asana.com/0/{ASANA_PROJECT_ID}/{task['gid']}"
