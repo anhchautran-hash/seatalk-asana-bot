@@ -1,5 +1,4 @@
 import os
-import time
 import httpx
 from datetime import datetime
 
@@ -22,7 +21,7 @@ def get_tasks():
     headers = {"Authorization": f"Bearer {ASANA_TOKEN}"}
     params = {
         "completed_since": "now",
-        "opt_fields": "name,assignee.name,due_on,custom_fields"
+        "opt_fields": "name,custom_fields"
     }
     r = httpx.get(
         f"https://app.asana.com/api/1.0/projects/{PROJECT_GID}/tasks",
@@ -37,17 +36,14 @@ def is_low_priority(task):
     return False
 
 def send_report(tasks):
-    token = get_seatalk_token()
     today = datetime.today().strftime("%d/%m/%Y")
     lines = [f"📋 Daily Tasks — {today}", f"Tổng: {len(tasks)} task đang mở\n"]
     for t in tasks:
-        assignee = (t.get("assignee") or {}).get("name", "Unassigned")
-        due = t.get("due_on") or "—"
-        lines.append(f"• {t['name']}\n  👤 {assignee}  📅 {due}")
+        lines.append(f"• {t['name']}")
 
     r = httpx.post(
         "https://openapi.seatalk.io/messaging/v2/group_chat",
-        headers={"Authorization": f"Bearer {token}"},
+        headers={"Authorization": f"Bearer {get_seatalk_token()}"},
         json={
             "group_id": SEATALK_GROUP_ID,
             "message": {"tag": "text", "text": {"content": "\n".join(lines)}}
