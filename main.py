@@ -13,6 +13,7 @@ import json
 import logging
 import time
 import re
+import difflib
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 
@@ -140,6 +141,24 @@ def get_asana_sections() -> dict:
         sections[s["name"].lower()] = s["gid"]
     log.info("Loaded sections: %s", list(sections.keys()))
     return sections
+
+
+def fuzzy_match_section(query: str, sections: dict) -> tuple[str | None, str | None]:
+    """Tìm section gần đúng nhất. Trả về (key, display_name) hoặc (None, None)."""
+    query = query.lower().strip()
+    # Khớp chính xác trước
+    if query in sections:
+        return query, query.capitalize()
+    # Fuzzy match
+    matches = difflib.get_close_matches(query, sections.keys(), n=1, cutoff=0.5)
+    if matches:
+        key = matches[0]
+        return key, key.capitalize()
+    # Tìm theo substring
+    for key in sections:
+        if query in key or key in query:
+            return key, key.capitalize()
+    return None, None
 
 
 def find_asana_user(name_query: str) -> str | None:
@@ -368,6 +387,17 @@ async def seatalk_webhook(
         log.warning("Missing text or group_id — skipping")
         return {"ok": True}
 
+    # Lệnh !sections — hiện danh sách sections
+    stripped = re.sub(r'^(@\S+\s*)+', '', text).strip()
+    if stripped.lower().startswith("!sections"):
+        try:
+            live_sections = get_asana_sections()
+            section_list = "\n".join(f"  • {name.capitalize()}" for name in live_sections.keys())
+            send_seatalk_group_message(group_id, f"📂 Danh sách sections:\n{section_list}\n\nCú pháp: !task [Section] Tên task - @Assignee | Details")
+        except Exception as e:
+            send_seatalk_group_message(group_id, f"❌ Lỗi: {str(e)}")
+        return {"ok": True}
+
     section_key, task_name, assignee_name, description = parse_task_command(text)
 
     if task_name is None:
@@ -386,9 +416,16 @@ async def seatalk_webhook(
         section_display = section_key.capitalize() if section_key else "Khác"
 
         if not section_gid:
-            log.warning("Section [%s] not found, falling back to Khác", section_key)
-            section_gid = live_sections.get("khác") or live_sections.get("khac")
-            section_display = "Khác"
+            # Thử fuzzy match
+            fuzzy_key, fuzzy_display = fuzzy_match_section(section_key, live_sections)
+            if fuzzy_key:
+                log.info("Fuzzy matched [%s] → [%s]", section_key, fuzzy_key)
+                section_gid = live_sections[fuzzy_key]
+                section_display = fuzzy_display
+            else:
+                log.warning("Section [%s] not found, falling back to Khác", section_key)
+                section_gid = live_sections.get("khác") or live_sections.get("khac")
+                section_display = "Khác"
 
         # Lookup assignee nếu có
         assignee_gid = None
