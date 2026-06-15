@@ -85,46 +85,21 @@ def send_seatalk_group_message(group_id: str, text: str):
     """Gửi tin nhắn vào group SeaTalk."""
     token = get_seatalk_token()
 
-    # Thử lần lượt các endpoint/format SeaTalk có thể dùng
-    attempts = [
-        # v2 format mới
-        {
-            "url": "https://openapi.seatalk.io/messaging/v2/send_group_message",
-            "body": {
-                "group_id": group_id,
-                "message": {"tag": "text", "text": {"content": text}},
-            },
+    # Endpoint chính xác theo SeaTalk OpenAPI: /messaging/v2/group_chat
+    resp = httpx.post(
+        "https://openapi.seatalk.io/messaging/v2/group_chat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "group_id": group_id,
+            "message": {"tag": "text", "text": {"content": text}},
         },
-        # v1 format cũ
-        {
-            "url": "https://openapi.seatalk.io/messaging/v1/send_group_message",
-            "body": {
-                "group_id": group_id,
-                "message": {"tag": "text", "text": {"content": text}},
-            },
-        },
-        # format không có version prefix
-        {
-            "url": "https://openapi.seatalk.io/messaging/send_group_message",
-            "body": {
-                "group_id": group_id,
-                "message": {"tag": "text", "text": {"content": text}},
-            },
-        },
-    ]
-
-    for attempt in attempts:
-        resp = httpx.post(
-            attempt["url"],
-            headers={"Authorization": f"Bearer {token}"},
-            json=attempt["body"],
-            timeout=10,
-        )
-        log.info("SeaTalk send [%s] → %s: %s", attempt["url"], resp.status_code, resp.text)
-        if resp.status_code == 200:
-            log.info("SeaTalk message sent to group %s", group_id)
-            return
-    log.error("All SeaTalk send attempts failed for group %s", group_id)
+        timeout=10,
+    )
+    log.info("SeaTalk send → %s: %s", resp.status_code, resp.text)
+    if resp.status_code == 200:
+        log.info("SeaTalk message sent to group %s", group_id)
+    else:
+        log.error("SeaTalk send failed: %s", resp.text)
 
 
 # ─── Asana helpers ───────────────────────────────────────────────────────────
