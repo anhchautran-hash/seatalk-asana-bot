@@ -40,7 +40,8 @@ MEMBER_MAP = {
     "mai anh":                "maianh.nguyentruc_ctv@garena.vn",
     # seatalk_id → email (dùng cho @me với External user)
     "9251829263":             "anhchau.tran@garena.vn",      # Châu Trần
-    "1294552826":             "tuongclk@gmail.com",           # Khánh Tường
+    "1294552826":             "maianh.nguyentruc_ctv@garena.vn",  # Nguyễn Trúc Mai Anh
+    "9252055694":             "tuongclk@gmail.com",           # Khánh Tường
 }
 
 # Workspace ID — tự động lấy từ project khi khởi động
