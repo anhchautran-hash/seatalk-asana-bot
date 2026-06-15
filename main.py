@@ -200,6 +200,9 @@ async def seatalk_webhook(
     log.info("Received: %s", json.dumps(payload, ensure_ascii=False))
 
     # SeaTalk gửi challenge khi verify URL — phải trả về ngay
+    if payload.get("event_type") == "event_verification":
+        challenge = payload.get("event", {}).get("seatalk_challenge", "")
+        return {"seatalk_challenge": challenge}
     if "seatalk_challenge" in payload:
         return {"seatalk_challenge": payload["seatalk_challenge"]}
     if "challenge" in payload:
