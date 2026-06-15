@@ -18,6 +18,7 @@ import json
 import logging
 import time
 
+import re
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 
@@ -165,6 +166,8 @@ def parse_task_command(text: str) -> tuple[str | None, str | None]:
         "xin chào mọi người"                  → (None, None)  → bỏ qua
     """
     text = text.strip()
+    # Bỏ @mention ở đầu nếu có (ví dụ: "@AsaPNS !task ...")
+    text = re.sub(r'^@\S+\s*', '', text).strip()
     if not text.lower().startswith("!task"):
         return None, None
 
