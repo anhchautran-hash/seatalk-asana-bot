@@ -24,8 +24,8 @@ SEATALK_APP_SECRET = "g0d_-DJAQvRuL1QV8MXNies02WcU7K3U"
 ASANA_TOKEN      = "2/1211043881249289/1215711068523662:623ea8a12e256d9c895e6a6de023ed29"
 ASANA_PROJECT_ID  = "1215522694635240"
 
-# Workspace ID — cần để search user theo tên
-# Lấy bằng cách gọi: GET https://app.asana.com/api/1.0/workspaces
+curl -H "Authorization: Bearer 2/1211043881249289/1215711068523662:623ea8a12e256d9c895e6a6de023ed29" \
+  https://app.asana.com/api/1.0/workspaces# Lấy bằng cách gọi: GET https://app.asana.com/api/1.0/workspaces
 ASANA_WORKSPACE_ID = ""  # ← điền workspace GID vào đây
 
 SECTION_MAP = {
