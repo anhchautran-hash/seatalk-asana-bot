@@ -56,3 +56,16 @@ if __name__ == "__main__":
         print(f"Sent {len(filtered)} tasks")
     else:
         print("No tasks to report")
+def send_report(tasks):
+    today = datetime.today().strftime("%d/%m/%Y")
+    lines = [f"📋 *Daily Tasks — {today}*", f"Tổng: {len(tasks)} task đang mở\n"]
+    for t in tasks:
+        assignee = (t.get("assignee") or {}).get("name", "Unassigned")
+        due = t.get("due_on") or "—"
+        lines.append(f"• {t['name']}\n  👤 {assignee}  📅 {due}")
+    
+    r = requests.post(SEATALK_WEBHOOK, json={
+        "tag": "text",
+        "text": {"content": "\n".join(lines)}
+    })
+    print(f"SeaTalk response: {r.status_code} - {r.text}")  # thêm dòng này
