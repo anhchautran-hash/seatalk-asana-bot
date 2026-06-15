@@ -82,20 +82,49 @@ def verify_seatalk_signature(body: bytes, timestamp: str, signature: str) -> boo
 
 
 def send_seatalk_group_message(group_id: str, text: str):
+    """Gửi tin nhắn vào group SeaTalk."""
     token = get_seatalk_token()
-    resp = httpx.post(
-        "https://openapi.seatalk.io/messaging/v2/send_group_message",
-        headers={"Authorization": f"Bearer {token}"},
-        json={
-            "group_id": group_id,
-            "message": {"tag": "text", "text": {"content": text}},
+
+    # Thử lần lượt các endpoint/format SeaTalk có thể dùng
+    attempts = [
+        # v2 format mới
+        {
+            "url": "https://openapi.seatalk.io/messaging/v2/send_group_message",
+            "body": {
+                "group_id": group_id,
+                "message": {"tag": "text", "text": {"content": text}},
+            },
         },
-        timeout=10,
-    )
-    if resp.status_code != 200:
-        log.error("SeaTalk send failed: %s", resp.text)
-    else:
-        log.info("SeaTalk message sent to group %s", group_id)
+        # v1 format cũ
+        {
+            "url": "https://openapi.seatalk.io/messaging/v1/send_group_message",
+            "body": {
+                "group_id": group_id,
+                "message": {"tag": "text", "text": {"content": text}},
+            },
+        },
+        # format không có version prefix
+        {
+            "url": "https://openapi.seatalk.io/messaging/send_group_message",
+            "body": {
+                "group_id": group_id,
+                "message": {"tag": "text", "text": {"content": text}},
+            },
+        },
+    ]
+
+    for attempt in attempts:
+        resp = httpx.post(
+            attempt["url"],
+            headers={"Authorization": f"Bearer {token}"},
+            json=attempt["body"],
+            timeout=10,
+        )
+        log.info("SeaTalk send [%s] → %s: %s", attempt["url"], resp.status_code, resp.text)
+        if resp.status_code == 200:
+            log.info("SeaTalk message sent to group %s", group_id)
+            return
+    log.error("All SeaTalk send attempts failed for group %s", group_id)
 
 
 # ─── Asana helpers ───────────────────────────────────────────────────────────
