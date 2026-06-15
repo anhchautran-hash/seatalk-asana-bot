@@ -37,17 +37,11 @@ def get_tasks_in_section(section_gid):
        headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
        params={
            "completed_since": "now",
-           "opt_fields": "name,completed,custom_fields,assignee.email"
+           "opt_fields": "name,completed,assignee.email"
        },
        timeout=10,
    )
    return r.json().get("data", [])
-
-def is_low_priority(task):
-   for cf in task.get("custom_fields", []):
-       if cf.get("name") == "Priority":
-           return (cf.get("display_value") or "").lower() == "low"
-   return False
 
 def send_message(token, text):
    r = httpx.post(
@@ -69,7 +63,7 @@ if __name__ == "__main__":
    all_sections_tasks = {}
    for section in sections:
        tasks = get_tasks_in_section(section["gid"])
-       filtered = [t for t in tasks if not t.get("completed") and not is_low_priority(t)]
+       filtered = [t for t in tasks if not t.get("completed")]
        if filtered:
            all_sections_tasks[section["name"]] = filtered
 
