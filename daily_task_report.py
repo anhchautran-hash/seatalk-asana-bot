@@ -23,27 +23,6 @@ def is_low_priority(task):
         if cf.get("name") == "Priority":
             return (cf.get("display_value") or "").lower() == "low"
     return False
-
-def send_report(tasks):
-    today = datetime.today().strftime("%d/%m/%Y")
-    lines = [f"📋 *Daily Tasks — {today}*", f"Tổng: {len(tasks)} task đang mở\n"]
-    for t in tasks:
-        assignee = (t.get("assignee") or {}).get("name", "Unassigned")
-        due = t.get("due_on") or "—"
-        lines.append(f"• {t['name']}\n  👤 {assignee}  📅 {due}")
-    
-    requests.post(SEATALK_WEBHOOK, json={
-        "tag": "text",
-        "text": {"content": "\n".join(lines)}
-    })
-
-if __name__ == "__main__":
-    tasks = [t for t in get_tasks() if not is_low_priority(t)]
-    if tasks:
-        send_report(tasks)
-        print(f"Sent {len(tasks)} tasks")
-    else:
-        print("No tasks to report")
 if __name__ == "__main__":
     all_tasks = get_tasks()
     print(f"Tổng task lấy được từ Asana: {len(all_tasks)}")  # thêm dòng này
