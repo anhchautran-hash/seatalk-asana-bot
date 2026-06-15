@@ -24,9 +24,28 @@ SEATALK_APP_SECRET = "g0d_-DJAQvRuL1QV8MXNies02WcU7K3U"
 ASANA_TOKEN      = "2/1211043881249289/1215711068523662:623ea8a12e256d9c895e6a6de023ed29"
 ASANA_PROJECT_ID  = "1215522694635240"
 
-curl -H "Authorization: Bearer 2/1211043881249289/1215711068523662:623ea8a12e256d9c895e6a6de023ed29" \
-  https://app.asana.com/api/1.0/workspaces# Lấy bằng cách gọi: GET https://app.asana.com/api/1.0/workspaces
-ASANA_WORKSPACE_ID = ""  # ← điền workspace GID vào đây
+# Workspace ID — tự động lấy từ project khi khởi động
+_asana_workspace_id_cache = {"gid": None}
+
+def get_asana_workspace_id() -> str | None:
+    """Tự động lấy workspace GID từ project."""
+    if _asana_workspace_id_cache["gid"]:
+        return _asana_workspace_id_cache["gid"]
+    try:
+        resp = httpx.get(
+            f"https://app.asana.com/api/1.0/projects/{ASANA_PROJECT_ID}",
+            headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
+            params={"opt_fields": "workspace.gid,workspace.name"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        gid = resp.json()["data"]["workspace"]["gid"]
+        _asana_workspace_id_cache["gid"] = gid
+        log.info("Asana workspace GID: %s", gid)
+        return gid
+    except Exception as e:
+        log.error("Could not fetch workspace GID: %s", e)
+        return None
 
 SECTION_MAP = {
     "realme":   "",
@@ -125,11 +144,16 @@ def get_asana_sections() -> dict:
 def find_asana_user(name_query: str) -> str | None:
     """Tìm Asana user GID theo tên (tìm gần đúng, không phân biệt hoa/thường).
     Trả về GID nếu tìm thấy, None nếu không."""
-    if not name_query or not ASANA_WORKSPACE_ID:
+    if not name_query:
+        return None
+
+    workspace_id = get_asana_workspace_id()
+    if not workspace_id:
+        log.error("No workspace ID, cannot search user")
         return None
 
     # Search theo email nếu có @ (ví dụ: mai.anh@garena.vn)
-    params = {"workspace": ASANA_WORKSPACE_ID, "opt_fields": "name,email"}
+    params = {"workspace": workspace_id, "opt_fields": "name,email"}
     if "@" in name_query:
         params["text"] = name_query
     else:
