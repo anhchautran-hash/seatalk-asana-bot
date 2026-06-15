@@ -44,3 +44,15 @@ if __name__ == "__main__":
         print(f"Sent {len(tasks)} tasks")
     else:
         print("No tasks to report")
+if __name__ == "__main__":
+    all_tasks = get_tasks()
+    print(f"Tổng task lấy được từ Asana: {len(all_tasks)}")  # thêm dòng này
+    
+    filtered = [t for t in all_tasks if not is_low_priority(t)]
+    print(f"Sau khi lọc Priority Low: {len(filtered)}")      # thêm dòng này
+    
+    if filtered:
+        send_report(filtered)
+        print(f"Sent {len(filtered)} tasks")
+    else:
+        print("No tasks to report")
