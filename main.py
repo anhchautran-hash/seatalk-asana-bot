@@ -26,6 +26,19 @@ ASANA_TOKEN      = "2/1211043881249289/1215711068523662:623ea8a12e256d9c895e6a6d
 ASANA_PROJECT_ID  = "1215522694635240"
 ASANA_DETAILS_FIELD_GID = "1215581143850080"  # Custom field "Details"
 
+# Map tên SeaTalk → email Asana (để assign task chính xác)
+MEMBER_MAP = {
+    "châu trần":              "anhchau.tran@garena.vn",
+    "chau tran":              "anhchau.tran@garena.vn",
+    "châu trần 0961103256":   "anhchau.tran@garena.vn",
+    "khánh tường":            "tuongclk@gmail.com",
+    "khanh tuong":            "tuongclk@gmail.com",
+    "khánh tường 0862020108": "tuongclk@gmail.com",
+    "nguyễn trúc mai anh":    "maianh.nguyentruc_ctv@garena.vn",
+    "nguyen truc mai anh":    "maianh.nguyentruc_ctv@garena.vn",
+    "mai anh":                "maianh.nguyentruc_ctv@garena.vn",
+}
+
 # Workspace ID — tự động lấy từ project khi khởi động
 _asana_workspace_id_cache = {"gid": None}
 
@@ -167,12 +180,26 @@ def find_asana_user(name_query: str) -> str | None:
     if not name_query:
         return None
 
+    # Kiểm tra MEMBER_MAP trước (chính xác nhất)
+    query_lower = name_query.lower().strip()
+    if query_lower in MEMBER_MAP:
+        email = MEMBER_MAP[query_lower]
+        log.info("MEMBER_MAP hit: %s → %s", name_query, email)
+        name_query = email  # dùng email để search Asana
+
+    # Fuzzy match trong MEMBER_MAP nếu chưa khớp chính xác
+    elif "@" not in name_query:
+        for key, email in MEMBER_MAP.items():
+            if query_lower in key or key in query_lower:
+                log.info("MEMBER_MAP fuzzy: %s → %s → %s", name_query, key, email)
+                name_query = email
+                break
+
     workspace_id = get_asana_workspace_id()
     if not workspace_id:
         log.error("No workspace ID, cannot search user")
         return None
 
-    # Search theo email nếu có @ (ví dụ: mai.anh@garena.vn)
     params = {"workspace": workspace_id, "opt_fields": "name,email"}
     if "@" in name_query:
         params["text"] = name_query
