@@ -1,0 +1,20 @@
+name: Daily Asana Report
+on:
+  schedule:
+    - cron: '0 3 * * *'  # 10am GMT+7
+  workflow_dispatch:  # cho phép chạy thủ công để test
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - run: python daily_task_report.py
+        env:
+          ASANA_TOKEN: ${{ secrets.ASANA_TOKEN }}
+          ASANA_PROJECT_GID: ${{ secrets.ASANA_PROJECT_GID }}
+          SEATALK_WEBHOOK_URL: ${{ secrets.SEATALK_WEBHOOK_URL }}
