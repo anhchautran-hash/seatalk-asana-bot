@@ -409,8 +409,9 @@ async def seatalk_webhook(
     # Sender info nằm trong message.sender (theo payload thực tế của SeaTalk)
     message_obj = event.get("message", {})
     sender_obj = message_obj.get("sender", {}) or event.get("sender", {})
-    sender_name = sender_obj.get("name", "") or event.get("sender", {}).get("name", "Thành viên")
+    sender_name = sender_obj.get("name", "") or event.get("sender", {}).get("name", "") or "Thành viên"
     sender_email = sender_obj.get("email", "") or event.get("sender", {}).get("email", "")
+    log.info("Sender: name=%s, email=%s", sender_name, sender_email)
 
     log.info("Text: [%s] | Group: [%s] | Sender: [%s]", text, group_id, sender_name)
 
