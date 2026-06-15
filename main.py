@@ -22,7 +22,11 @@ SEATALK_APP_ID     = "MzY4ODY3MDkyNzgw"
 SEATALK_APP_SECRET = "g0d_-DJAQvRuL1QV8MXNies02WcU7K3U"
 
 ASANA_TOKEN      = "2/1211043881249289/1215711068523662:623ea8a12e256d9c895e6a6de023ed29"
-ASANA_PROJECT_ID = "1215522694635240"
+ASANA_PROJECT_ID  = "1215522694635240"
+
+# Workspace ID — cần để search user theo tên
+# Lấy bằng cách gọi: GET https://app.asana.com/api/1.0/workspaces
+ASANA_WORKSPACE_ID = ""  # ← điền workspace GID vào đây
 
 SECTION_MAP = {
     "realme":   "",
@@ -118,13 +122,55 @@ def get_asana_sections() -> dict:
     return sections
 
 
-def create_asana_task(task_name: str, section_gid: str | None) -> dict:
+def find_asana_user(name_query: str) -> str | None:
+    """Tìm Asana user GID theo tên (tìm gần đúng, không phân biệt hoa/thường).
+    Trả về GID nếu tìm thấy, None nếu không."""
+    if not name_query or not ASANA_WORKSPACE_ID:
+        return None
+
+    # Search theo email nếu có @ (ví dụ: mai.anh@garena.vn)
+    params = {"workspace": ASANA_WORKSPACE_ID, "opt_fields": "name,email"}
+    if "@" in name_query:
+        params["text"] = name_query
+    else:
+        params["text"] = name_query
+
+    try:
+        resp = httpx.get(
+            "https://app.asana.com/api/1.0/users",
+            headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
+            params=params,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        users = resp.json().get("data", [])
+
+        query_lower = name_query.lower().strip()
+        for user in users:
+            user_name = user.get("name", "").lower()
+            user_email = user.get("email", "").lower()
+            # Khớp chính xác tên hoặc email
+            if query_lower in user_name or query_lower in user_email:
+                log.info("Found assignee: %s (%s) → %s", user["name"], user.get("email"), user["gid"])
+                return user["gid"]
+
+        log.warning("Assignee not found for query: %s", name_query)
+        return None
+
+    except Exception as e:
+        log.error("Error finding user %s: %s", name_query, e)
+        return None
+
+
+def create_asana_task(task_name: str, section_gid: str | None, assignee_gid: str | None = None) -> dict:
     payload = {
         "data": {
             "name": task_name,
             "projects": [ASANA_PROJECT_ID],
         }
     }
+    if assignee_gid:
+        payload["data"]["assignee"] = assignee_gid
     resp = httpx.post(
         "https://app.asana.com/api/1.0/tasks",
         headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
@@ -148,24 +194,39 @@ def create_asana_task(task_name: str, section_gid: str | None) -> dict:
 
 # ─── Parse tin nhắn ──────────────────────────────────────────────────────────
 
-def parse_task_command(text: str) -> tuple[str | None, str | None]:
+def parse_task_command(text: str) -> tuple[str | None, str | None, str | None]:
+    """
+    Parse lệnh !task. Trả về (section, task_name, assignee_name).
+    Ví dụ: "@AsaPNS !task [Lotte] Hỏi tình hình - @nguyễn trúc mai anh"
+           → ("lotte", "Hỏi tình hình", "nguyễn trúc mai anh")
+    """
     text = text.strip()
-    # Bỏ tất cả @mention ở đầu (có thể nhiều mention)
+    # Bỏ tất cả @mention ở đầu (bot mention)
     text = re.sub(r'^(@\S+\s*)+', '', text).strip()
 
     if not text.lower().startswith("!task"):
-        return None, None
+        return None, None, None
 
     content = text[5:].strip()
 
+    # Parse section
+    section = "khác"
     if content.startswith("["):
         end = content.find("]")
         if end != -1:
             section = content[1:end].strip().lower()
-            task_name = content[end + 1:].strip()
-            return section, task_name
+            content = content[end + 1:].strip()
 
-    return "khác", content
+    # Parse assignee: tìm " - @tên" ở cuối
+    assignee_name = None
+    # Pattern: dấu " - @" rồi phần còn lại là tên (có thể có khoảng trắng)
+    assignee_match = re.search(r'\s*-\s*@(.+)$', content)
+    if assignee_match:
+        assignee_name = assignee_match.group(1).strip()
+        content = content[:assignee_match.start()].strip()
+
+    task_name = content
+    return section, task_name, assignee_name
 
 
 # ─── Webhook endpoint ─────────────────────────────────────────────────────────
@@ -272,7 +333,7 @@ async def seatalk_webhook(
         log.warning("Missing text or group_id — skipping")
         return {"ok": True}
 
-    section_key, task_name = parse_task_command(text)
+    section_key, task_name, assignee_name = parse_task_command(text)
 
     if task_name is None:
         log.info("Not a !task command, ignoring")
@@ -294,14 +355,27 @@ async def seatalk_webhook(
             section_gid = live_sections.get("khác") or live_sections.get("khac")
             section_display = "Khác"
 
-        task = create_asana_task(task_name, section_gid)
+        # Lookup assignee nếu có
+        assignee_gid = None
+        assignee_display = None
+        if assignee_name:
+            assignee_gid = find_asana_user(assignee_name)
+            if assignee_gid:
+                assignee_display = assignee_name.title()
+            else:
+                log.warning("Could not find assignee: %s", assignee_name)
+
+        task = create_asana_task(task_name, section_gid, assignee_gid)
         task_url = f"https://app.asana.com/0/{ASANA_PROJECT_ID}/{task['gid']}"
+
+        assignee_line = f"\n👤 Assignee: {assignee_display}" if assignee_display else (f"\n⚠️ Không tìm thấy assignee: {assignee_name}" if assignee_name else "")
 
         msg = (
             f"✅ Task đã được tạo!\n"
             f"📌 {task_name}\n"
             f"📂 Section: {section_display}\n"
-            f"👤 Tạo bởi: {sender_name}\n"
+            f"🙋 Tạo bởi: {sender_name}"
+            f"{assignee_line}\n"
             f"🔗 {task_url}"
         )
         send_seatalk_group_message(group_id, msg)
