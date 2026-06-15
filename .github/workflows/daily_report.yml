@@ -1,8 +1,8 @@
 name: Daily Asana Report
 on:
   schedule:
-    - cron: '0 3 * * *'  # 10am GMT+7
-  workflow_dispatch:  # cho phép chạy thủ công để test
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 jobs:
   report:
@@ -12,9 +12,11 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      - run: pip install requests
+      - run: pip install requests httpx
       - run: python daily_task_report.py
         env:
           ASANA_TOKEN: ${{ secrets.ASANA_TOKEN }}
           ASANA_PROJECT_GID: ${{ secrets.ASANA_PROJECT_GID }}
-          SEATALK_WEBHOOK_URL: ${{ secrets.SEATALK_WEBHOOK_URL }}
+          SEATALK_APP_ID: ${{ secrets.SEATALK_APP_ID }}
+          SEATALK_APP_SECRET: ${{ secrets.SEATALK_APP_SECRET }}
+          SEATALK_GROUP_ID: ${{ secrets.SEATALK_GROUP_ID }}
