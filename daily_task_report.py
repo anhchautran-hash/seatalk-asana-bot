@@ -17,15 +17,23 @@ def get_seatalk_token():
     resp.raise_for_status()
     return resp.json()["app_access_token"]
 
-def get_tasks():
-    headers = {"Authorization": f"Bearer {ASANA_TOKEN}"}
-    params = {
-        "completed_since": "now",
-        "opt_fields": "name,custom_fields"
-    }
+def get_sections():
     r = httpx.get(
-        f"https://app.asana.com/api/1.0/projects/{PROJECT_GID}/tasks",
-        headers=headers, params=params, timeout=10
+        f"https://app.asana.com/api/1.0/projects/{PROJECT_GID}/sections",
+        headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
+        timeout=10,
+    )
+    return r.json().get("data", [])
+
+def get_tasks_in_section(section_gid):
+    r = httpx.get(
+        f"https://app.asana.com/api/1.0/sections/{section_gid}/tasks",
+        headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
+        params={
+            "completed_since": "now",
+            "opt_fields": "name,completed,custom_fields"
+        },
+        timeout=10,
     )
     return r.json().get("data", [])
 
@@ -35,11 +43,17 @@ def is_low_priority(task):
             return (cf.get("display_value") or "").lower() == "low"
     return False
 
-def send_report(tasks):
+def send_report(sections_data):
     today = datetime.today().strftime("%d/%m/%Y")
-    lines = [f"📋 Daily Tasks — {today}", f"Tổng: {len(tasks)} task đang mở\n"]
-    for t in tasks:
-        lines.append(f"• {t['name']}")
+    lines = [f"📋 Daily Tasks — {today}\n"]
+
+    for section_name, tasks in sections_data.items():
+        if not tasks:
+            continue
+        lines.append(f"📂 {section_name}")
+        for t in tasks:
+            lines.append(f"  • {t['name']}")
+        lines.append("")
 
     r = httpx.post(
         "https://openapi.seatalk.io/messaging/v2/group_chat",
@@ -53,11 +67,19 @@ def send_report(tasks):
     print(f"SeaTalk response: {r.status_code} - {r.text}")
 
 if __name__ == "__main__":
-    all_tasks = get_tasks()
-    print(f"Tổng task lấy được từ Asana: {len(all_tasks)}")
-    filtered = [t for t in all_tasks if not is_low_priority(t)]
-    print(f"Sau khi lọc Priority Low: {len(filtered)}")
-    if filtered:
-        send_report(filtered)
+    sections = get_sections()
+    sections_data = {}
+    total = 0
+
+    for section in sections:
+        tasks = get_tasks_in_section(section["gid"])
+        filtered = [t for t in tasks if not t.get("completed") and not is_low_priority(t)]
+        if filtered:
+            sections_data[section["name"]] = filtered
+            total += len(filtered)
+
+    print(f"Tổng task: {total}")
+    if sections_data:
+        send_report(sections_data)
     else:
         print("No tasks to report")
