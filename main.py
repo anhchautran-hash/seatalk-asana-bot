@@ -128,7 +128,6 @@ def send_seatalk_group_message(group_id: str, text: str):
     """Gửi tin nhắn vào group SeaTalk."""
     token = get_seatalk_token()
 
-    # Endpoint chính xác theo SeaTalk OpenAPI: /messaging/v2/group_chat
     resp = httpx.post(
         "https://openapi.seatalk.io/messaging/v2/group_chat",
         headers={"Authorization": f"Bearer {token}"},
@@ -139,7 +138,27 @@ def send_seatalk_group_message(group_id: str, text: str):
         timeout=10,
     )
     log.info("SeaTalk send → %s: %s", resp.status_code, resp.text)
+
+    # Nếu token hết hạn (code 100), xóa cache và thử lại 1 lần
     if resp.status_code == 200:
+        data = resp.json()
+        if data.get("code") == 100:
+            log.warning("Token expired, refreshing and retrying...")
+            _seatalk_token_cache["token"] = None
+            _seatalk_token_cache["expires_at"] = 0
+            token = get_seatalk_token()
+            resp = httpx.post(
+                "https://openapi.seatalk.io/messaging/v2/group_chat",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "group_id": group_id,
+                    "message": {"tag": "text", "text": {"content": text}},
+                },
+                timeout=10,
+            )
+            log.info("SeaTalk retry → %s: %s", resp.status_code, resp.text)
+
+    if resp.status_code == 200 and resp.json().get("code") == 0:
         log.info("SeaTalk message sent to group %s", group_id)
     else:
         log.error("SeaTalk send failed: %s", resp.text)
