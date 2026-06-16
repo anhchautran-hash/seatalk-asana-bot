@@ -89,6 +89,10 @@ app = FastAPI(title="SeaTalk–Asana Bot")
 
 _seatalk_token_cache = {"token": None, "expires_at": 0}
 
+# Cache message_id đã xử lý để tránh duplicate (giữ 100 ID gần nhất)
+_processed_message_ids: list = []
+MAX_PROCESSED_IDS = 100
+
 
 # ─── SeaTalk helpers ─────────────────────────────────────────────────────────
 
@@ -422,6 +426,16 @@ async def seatalk_webhook(
     # LOG TOÀN BỘ PAYLOAD để debug
     log.info("=== WEBHOOK RECEIVED ===")
     log.info("Payload: %s", json.dumps(payload, ensure_ascii=False, indent=2))
+
+    # Chống duplicate: bỏ qua nếu message_id đã xử lý
+    msg_id = payload.get("event", {}).get("message", {}).get("message_id", "")
+    if msg_id and msg_id in _processed_message_ids:
+        log.info("Duplicate message_id %s, skipping", msg_id)
+        return {"ok": True}
+    if msg_id:
+        _processed_message_ids.append(msg_id)
+        if len(_processed_message_ids) > MAX_PROCESSED_IDS:
+            _processed_message_ids.pop(0)
 
     # Challenge verification
     if payload.get("event_type") == "event_verification":
