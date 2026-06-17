@@ -1,7 +1,5 @@
 name: Daily Asana Report
 on:
-  schedule:
-    - cron: '57 14 * * *'
   workflow_dispatch:
 
 jobs:
