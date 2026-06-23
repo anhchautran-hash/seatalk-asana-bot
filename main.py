@@ -1,4 +1,3 @@
-```python
 """
 SeaTalk → Asana Bot
 ====================
@@ -553,4 +552,3 @@ async def seatalk_webhook(
 @app.get("/")
 def health():
     return {"status": "ok", "bot": "SeaTalk–Asana Bot"}
-```
