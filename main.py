@@ -463,11 +463,19 @@ async def seatalk_webhook(
                 ic.clear_awaiting(media_group_id)
                 ic.clear_pending_image(media_group_id)
             else:
-                # Fallback: chưa có lệnh !checkinvoice nào đang chờ — chỉ cache lại để dùng nếu gõ lệnh sau
+                # Fallback: chưa có lệnh !checkinvoice nào đang chờ (có thể do vừa deploy lại,
+                # hoặc đã quá hạn chờ) — cache lại ảnh, đồng thời báo cho người dùng biết để gõ lại lệnh,
+                # tránh im lặng khó hiểu.
                 ic.store_pending_image(
                     media_group_id, b64, media_info["media_type"], media_info["is_pdf"], media_info.get("filename", "invoice")
                 )
                 log.info("Cached invoice image for group %s (no pending !checkinvoice)", media_group_id)
+                send_seatalk_group_message(
+                    media_group_id,
+                    "⚠️ Bot chưa nhận lệnh !checkinvoice cho lần gửi file này (có thể do bot vừa khởi động lại). "
+                    "Gõ @AsaPNS !checkinvoice lại giúp mình nhé, bot sẽ dùng ngay file bạn vừa gửi.",
+                    thread_id=media_thread_id,
+                )
         except Exception as e:
             log.error("Could not download invoice media: %s", e, exc_info=True)
         return {"ok": True}
