@@ -30,6 +30,7 @@ import io
 import logging
 import re
 import time
+import unicodedata
 
 from PIL import Image
 import pytesseract
@@ -193,10 +194,12 @@ def extract_invoice_data(b64_data: str, media_type: str, is_pdf: bool) -> dict:
 # ─── So khớp ─────────────────────────────────────────────────────────────────
 
 def _normalize(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+    s = unicodedata.normalize("NFC", s or "")
+    return re.sub(r"\s+", " ", s.strip()).lower()
 
 
 def _tokens(s: str) -> list:
+    s = unicodedata.normalize("NFC", s or "")
     return [t for t in re.findall(r"[^\W\d_]+", s.lower(), flags=re.UNICODE) if len(t) >= 2]
 
 
@@ -209,23 +212,57 @@ def _fuzzy_contains(expected: str, text_norm: str, threshold: float = 0.8) -> bo
     return (found / len(toks)) >= threshold
 
 
+def _best_matching_line(expected: str, raw_text: str) -> tuple:
+    """
+    So khớp CHẶT HƠN: chỉ tính % từ khớp trong TỪNG DÒNG (hoặc 2 dòng liền kề gộp lại,
+    để không bị hỏng khi địa chỉ dài bị OCR ngắt xuống dòng) — không gộp cả văn bản,
+    để tránh trường hợp các từ trùng khớp bị "nhặt" rải rác từ nhiều dòng/trường khác nhau
+    (VD: dòng bên bán + dòng bên mua cộng lại vô tình đủ % từ).
+    Trả về (dòng khớp nhất, điểm khớp 0..1).
+    """
+    toks = _tokens(expected)
+    if not toks:
+        return "", 0.0
+    raw_lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
+    candidates = list(raw_lines)
+    for i in range(len(raw_lines) - 1):
+        candidates.append(f"{raw_lines[i]} {raw_lines[i + 1]}")
+
+    best_line, best_score = "", 0.0
+    for line in candidates:
+        line_norm = _normalize(line)
+        found = sum(1 for t in toks if t in line_norm)
+        score = found / len(toks)
+        if score > best_score:
+            best_score = score
+            best_line = line
+    return best_line, best_score
+
+
 def compare_invoice(extracted: dict) -> dict:
     raw_text = extracted.get("raw_text", "")
-    raw_norm = _normalize(raw_text)
     raw_digits = re.sub(r"[^\d]", "", raw_text)
 
     lines = []
     counts = {"match": 0, "mismatch": 0}
 
+    # Tên đơn vị & Địa chỉ: so khớp CHẶT trong từng dòng (không gộp cả văn bản),
+    # ngưỡng cao hơn (75%) vì giờ đã so trong phạm vi 1 dòng nên khó bị "ăn may".
+    # Luôn hiển thị nguyên văn dòng OCR đọc được để tự kiểm tra lại bằng mắt.
     for field_key in ("ten_don_vi", "dia_chi"):
         label, _default = FIELDS[field_key]
         expected = get_field_value(field_key)
-        if _fuzzy_contains(expected, raw_norm):
+        best_line, score = _best_matching_line(expected, raw_text)
+        threshold = 0.75
+        if score >= threshold:
             counts["match"] += 1
-            lines.append(f"✅ {label}: khớp với thông tin trên hoá đơn")
+            lines.append(f"✅ {label}: khớp\n    OCR đọc: \"{best_line}\"")
         else:
             counts["mismatch"] += 1
-            lines.append(f"❌ {label}: KHÔNG tìm thấy \"{expected}\" trên hoá đơn (hoặc OCR đọc chưa rõ)")
+            lines.append(
+                f"❌ {label}: cần \"{expected}\"\n"
+                f"    OCR đọc được (gần nhất): \"{best_line or '(không thấy dòng nào tương ứng)'}\""
+            )
 
     expected_mst = get_field_value("mst")
     expected_mst_digits = re.sub(r"[^\d]", "", expected_mst)
