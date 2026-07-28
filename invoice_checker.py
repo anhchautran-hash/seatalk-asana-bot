@@ -134,20 +134,24 @@ def download_seatalk_media(url_or_key: str, seatalk_token: str) -> bytes:
 
 
 def extract_media_info(message: dict) -> dict | None:
-    """Trả về {"url":..., "is_pdf":bool, "media_type":...} nếu message này là ảnh/file."""
+    """Trả về {"url":..., "is_pdf":bool, "media_type":...} nếu message này là ảnh/file.
+
+    Xác nhận từ log thật (2026-07-28): SeaTalk trả link tải ở field "content", ví dụ:
+      {"tag": "file", "file": {"content": "https://openapi.seatalk.io/messaging/v2/file/...", "filename": "Hoadon 9223.pdf"}}
+    """
     tag = message.get("tag")
     image_obj = message.get("image") if isinstance(message.get("image"), dict) else None
     file_obj = message.get("file") if isinstance(message.get("file"), dict) else None
 
     if tag == "image" or image_obj:
         obj = image_obj or {}
-        url = obj.get("url") or obj.get("image_url") or obj.get("download_url")
+        url = obj.get("content") or obj.get("url") or obj.get("image_url") or obj.get("download_url")
         if url:
             return {"url": url, "is_pdf": False, "media_type": "image/jpeg"}
 
     if tag == "file" or file_obj:
         obj = file_obj or {}
-        url = obj.get("url") or obj.get("file_url") or obj.get("download_url")
+        url = obj.get("content") or obj.get("url") or obj.get("file_url") or obj.get("download_url")
         filename = (obj.get("filename") or obj.get("name") or "").lower()
         if url:
             is_pdf = filename.endswith(".pdf") or "pdf" in (obj.get("content_type", "") or "")
