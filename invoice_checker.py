@@ -1,7 +1,8 @@
 """
 invoice_checker.py
 ===================
-Tính năng !checkinvoice cho bot AsaPNS — bản đơn giản.
+Tính năng !checkinvoice cho bot AsaPNS — bản dùng OCR miễn phí (Tesseract),
+KHÔNG cần API key Anthropic hay bất kỳ tài khoản trả phí nào.
 
 Chỉ kiểm tra 3 thông tin cố định của bên mua (Garena) trên hoá đơn nháp:
   - Tên đơn vị
@@ -11,25 +12,26 @@ Chỉ kiểm tra 3 thông tin cố định của bên mua (Garena) trên hoá đ
 Luồng dùng trong SeaTalk group:
   1) Thành viên gửi ẢNH hoặc FILE PDF hoá đơn nháp vào group.
   2) Gõ: !checkinvoice
-  3) Bot đọc hoá đơn (qua Claude API), so với 3 thông tin cố định bên dưới,
-     trả lời ✅ khớp / ❌ sai lệch cho từng mục.
+  3) Bot đọc chữ trên hoá đơn bằng Tesseract OCR (chạy local, miễn phí), so với
+     3 thông tin cố định bên dưới, trả lời ✅ khớp / ❌ sai lệch cho từng mục.
 
 Muốn sửa thông tin cố định: sửa trực tiếp 3 hằng số EXPECTED_* bên dưới rồi deploy lại,
 hoặc dùng lệnh nhanh (không cần deploy lại, nhưng sẽ mất khi bot restart):
   !setref ten_don_vi=... | !setref dia_chi=... | !setref mst=...
 
-Cần cấu hình (env var trên Render):
-  ANTHROPIC_API_KEY  - API key Anthropic (dùng để đọc hoá đơn)
+LƯU Ý: cần cài thêm gói hệ thống tesseract-ocr (+ gói ngôn ngữ tiếng Việt) và poppler-utils
+(để đọc PDF) — xem Dockerfile đính kèm. Không cần env var nào cả.
 """
 
 import base64
-import json
+import io
 import logging
-import os
 import re
 import time
 
-import httpx
+from PIL import Image
+import pytesseract
+from pdf2image import convert_from_bytes
 
 log = logging.getLogger(__name__)
 
@@ -39,15 +41,13 @@ EXPECTED_TEN_DON_VI = "CÔNG TY CỔ PHẦN GIẢI TRÍ VÀ THỂ THAO ĐIỆN T
 EXPECTED_DIA_CHI = "Tầng 6, Tòa nhà Capital Place, 29 Liễu Giai, Phường Ngọc Hà, Thành phố Hà Nội, Việt Nam"
 EXPECTED_MST = "0105301438"
 
-# field_key -> (nhãn hiển thị, giá trị mặc định, kiểu so khớp: "exact" | "contains")
 FIELDS = {
-    "ten_don_vi": ("Tên đơn vị", EXPECTED_TEN_DON_VI, "contains"),
-    "dia_chi": ("Địa chỉ", EXPECTED_DIA_CHI, "contains"),
-    "mst": ("Mã số thuế", EXPECTED_MST, "exact"),
+    "ten_don_vi": ("Tên đơn vị", EXPECTED_TEN_DON_VI),
+    "dia_chi": ("Địa chỉ", EXPECTED_DIA_CHI),
+    "mst": ("Mã số thuế", EXPECTED_MST),
 }
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = "claude-sonnet-5"
+OCR_LANGS = "vie+eng"  # cần đã cài gói ngôn ngữ tesseract-ocr-vie
 
 # ─── Cache ảnh chờ kiểm tra (gửi ảnh trước, gõ lệnh sau) ───────────────────
 
@@ -98,6 +98,8 @@ def download_seatalk_media(url_or_key: str, seatalk_token: str) -> bytes:
     xem log Render để biết chính xác field chứa URL ảnh và chỉnh extract_media_info()
     bên dưới nếu cần. Hàm này giả định url_or_key là URL tải trực tiếp kèm Bearer token.
     """
+    import httpx
+
     resp = httpx.get(
         url_or_key,
         headers={"Authorization": f"Bearer {seatalk_token}"},
@@ -134,53 +136,29 @@ def extract_media_info(message: dict) -> dict | None:
     return None
 
 
-# ─── Claude API: trích xuất dữ liệu hoá đơn ─────────────────────────────────
+# ─── OCR: đọc chữ trên hoá đơn (Tesseract, miễn phí, chạy local) ────────────
 
 def extract_invoice_data(b64_data: str, media_type: str, is_pdf: bool) -> dict:
-    if not ANTHROPIC_API_KEY:
-        raise RuntimeError("Thiếu env var ANTHROPIC_API_KEY.")
+    raw_bytes = base64.b64decode(b64_data)
+    texts = []
 
-    system_instruction = (
-        "Bạn là công cụ trích xuất dữ liệu hoá đơn (hoá đơn GTGT / hoá đơn nháp) tiếng Việt.\n"
-        "Đọc kỹ ảnh hoặc tài liệu được cung cấp, tìm phần thông tin ĐƠN VỊ MUA HÀNG "
-        "(Company's Name / Company Buyer), và trả về DUY NHẤT một đối tượng JSON hợp lệ, "
-        "KHÔNG kèm giải thích, KHÔNG markdown, KHÔNG dấu backtick, đúng 3 khoá sau "
-        "(giá trị dạng chuỗi, để chuỗi rỗng \"\" nếu không tìm thấy):\n"
-        '{"ten_don_vi": "", "dia_chi": "", "mst": ""}'
-    )
+    if is_pdf:
+        try:
+            pages = convert_from_bytes(raw_bytes, dpi=200)
+        except Exception as e:
+            raise RuntimeError(f"Không đọc được file PDF: {e}")
+        for page in pages[:3]:  # chỉ đọc tối đa 3 trang đầu cho nhanh
+            texts.append(pytesseract.image_to_string(page, lang=OCR_LANGS))
+    else:
+        try:
+            img = Image.open(io.BytesIO(raw_bytes))
+        except Exception as e:
+            raise RuntimeError(f"Không đọc được file ảnh: {e}")
+        texts.append(pytesseract.image_to_string(img, lang=OCR_LANGS))
 
-    content_block = (
-        {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64_data}}
-        if is_pdf
-        else {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64_data}}
-    )
-
-    resp = httpx.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": ANTHROPIC_MODEL,
-            "max_tokens": 500,
-            "system": system_instruction,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [content_block, {"type": "text", "text": "Trích xuất dữ liệu theo đúng schema JSON đã yêu cầu."}],
-                }
-            ],
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
-    raw_text = "\n".join(text_blocks).strip()
-    cleaned = re.sub(r"^```json\s*|^```\s*|```\s*$", "", raw_text, flags=re.IGNORECASE).strip()
-    return json.loads(cleaned)
+    raw_text = "\n".join(texts)
+    log.info("OCR raw_text (%d ký tự): %s", len(raw_text), raw_text[:500])
+    return {"raw_text": raw_text}
 
 
 # ─── So khớp ─────────────────────────────────────────────────────────────────
@@ -189,35 +167,58 @@ def _normalize(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
 
 
-def compare_invoice(extracted: dict) -> dict:
-    lines = []
-    counts = {"match": 0, "mismatch": 0, "missing": 0}
+def _tokens(s: str) -> list:
+    return [t for t in re.findall(r"[^\W\d_]+", s.lower(), flags=re.UNICODE) if len(t) >= 2]
 
-    for field_key, (label, _default, mode) in FIELDS.items():
+
+def _fuzzy_contains(expected: str, text_norm: str, threshold: float = 0.8) -> bool:
+    """OCR có thể lệch vài ký tự/dấu câu — so theo % từ khớp thay vì so nguyên câu 1:1."""
+    toks = _tokens(expected)
+    if not toks:
+        return False
+    found = sum(1 for t in toks if t in text_norm)
+    return (found / len(toks)) >= threshold
+
+
+def compare_invoice(extracted: dict) -> dict:
+    raw_text = extracted.get("raw_text", "")
+    raw_norm = _normalize(raw_text)
+    raw_digits = re.sub(r"[^\d]", "", raw_text)
+
+    lines = []
+    counts = {"match": 0, "mismatch": 0}
+
+    # Tên đơn vị & Địa chỉ: so khớp tương đối (fuzzy) vì OCR có thể lệch vài ký tự
+    for field_key in ("ten_don_vi", "dia_chi"):
+        label, _default = FIELDS[field_key]
         expected = get_field_value(field_key)
-        extracted_val = extracted.get(field_key, "")
-        if not extracted_val:
-            counts["missing"] += 1
-            lines.append(f"⚠️ {label}: cần \"{expected}\" — không đọc được trên hoá đơn")
-            continue
-        en, ex = _normalize(extracted_val), _normalize(expected)
-        match = en == ex if mode == "exact" else (ex in en or en in ex)
-        if match:
+        if _fuzzy_contains(expected, raw_norm):
             counts["match"] += 1
-            lines.append(f"✅ {label}: khớp ({extracted_val})")
+            lines.append(f"✅ {label}: khớp với thông tin trên hoá đơn")
         else:
             counts["mismatch"] += 1
-            lines.append(f"❌ {label}: cần \"{expected}\" — hoá đơn ghi \"{extracted_val}\"")
+            lines.append(f"❌ {label}: KHÔNG tìm thấy \"{expected}\" trên hoá đơn (hoặc OCR đọc chưa rõ)")
+
+    # Mã số thuế: so khớp chuỗi số (bỏ hết ký tự không phải số 2 bên rồi so)
+    expected_mst = get_field_value("mst")
+    expected_mst_digits = re.sub(r"[^\d]", "", expected_mst)
+    if expected_mst_digits and expected_mst_digits in raw_digits:
+        counts["match"] += 1
+        lines.append(f"✅ Mã số thuế: khớp ({expected_mst})")
+    else:
+        counts["mismatch"] += 1
+        lines.append(f"❌ Mã số thuế: KHÔNG tìm thấy \"{expected_mst}\" trên hoá đơn (hoặc OCR đọc chưa rõ)")
 
     return {"lines": lines, "counts": counts}
 
 
 def format_result_message(result: dict) -> str:
     c = result["counts"]
-    overall = "✅ ĐÃ KHỚP — có thể duyệt" if c["mismatch"] == 0 and c["missing"] == 0 else "🔴 CẦN KIỂM TRA LẠI trước khi duyệt"
-    summary = f"({c['match']} khớp · {c['mismatch']} sai lệch · {c['missing']} thiếu)\n\n"
+    overall = "✅ ĐÃ KHỚP — có thể duyệt" if c["mismatch"] == 0 else "🔴 CẦN KIỂM TRA LẠI trước khi duyệt"
+    summary = f"({c['match']} khớp · {c['mismatch']} sai lệch)\n\n"
     body = "\n".join(result["lines"])
-    return f"📋 Đối chiếu thông tin đơn vị mua trên hoá đơn\n{overall}\n{summary}{body}"
+    note = "\n\n(Đọc bằng OCR miễn phí — nếu ảnh mờ/nghiêng có thể đọc sai, nên kiểm tra lại bằng mắt khi thấy ❌.)"
+    return f"📋 Đối chiếu thông tin đơn vị mua trên hoá đơn\n{overall}\n{summary}{body}{note}"
 
 
 # ─── Parse lệnh ─────────────────────────────────────────────────────────────
