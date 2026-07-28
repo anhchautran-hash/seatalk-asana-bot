@@ -134,15 +134,21 @@ def verify_seatalk_signature(body: bytes, timestamp: str, signature: str) -> boo
     return hmac.compare_digest(expected, signature)
 
 
-def send_seatalk_group_message(group_id: str, text: str):
+def send_seatalk_group_message(group_id: str, text: str, thread_id: str | None = None):
     token = get_seatalk_token()
+    body = {
+        "group_id": group_id,
+        "message": {"tag": "text", "text": {"content": text}},
+    }
+    if thread_id:
+        # LƯU Ý: chưa có tài liệu chính thức xác nhận tên field này — thử nghiệm theo suy đoán
+        # dựa trên field "thread_id" đã thấy ở tin nhắn nhận được. Nếu tin nhắn vẫn gửi ra ngoài
+        # thread (không nest), cần xem log phản hồi để điều chỉnh tên field cho đúng.
+        body["thread_id"] = thread_id
     resp = httpx.post(
         "https://openapi.seatalk.io/messaging/v2/group_chat",
         headers={"Authorization": f"Bearer {token}"},
-        json={
-            "group_id": group_id,
-            "message": {"tag": "text", "text": {"content": text}},
-        },
+        json=body,
         timeout=10,
     )
     log.info("SeaTalk send → %s: %s", resp.status_code, resp.text)
@@ -157,10 +163,7 @@ def send_seatalk_group_message(group_id: str, text: str):
             resp = httpx.post(
                 "https://openapi.seatalk.io/messaging/v2/group_chat",
                 headers={"Authorization": f"Bearer {token}"},
-                json={
-                    "group_id": group_id,
-                    "message": {"tag": "text", "text": {"content": text}},
-                },
+                json=body,
                 timeout=10,
             )
             log.info("SeaTalk retry → %s: %s", resp.status_code, resp.text)
@@ -376,17 +379,17 @@ def extract_text_and_group(event: dict) -> tuple[str, str]:
     return text, group_id
 
 
-def run_invoice_check_and_reply(group_id: str, b64_data: str, media_type: str, is_pdf: bool, filename: str = "invoice"):
+def run_invoice_check_and_reply(group_id: str, b64_data: str, media_type: str, is_pdf: bool, filename: str = "invoice", thread_id: str | None = None):
     """Gọi workflow OCR nội bộ + so khớp trong background, gửi kết quả vào group khi xong."""
     try:
         extracted = ic.extract_invoice_data(b64_data, media_type, is_pdf, filename)
         result = ic.compare_invoice(extracted)
         msg = ic.format_result_message(result)
-        send_seatalk_group_message(group_id, msg)
+        send_seatalk_group_message(group_id, msg, thread_id=thread_id)
         log.info("checkinvoice (background) done for group %s", group_id)
     except Exception as e:
         log.error("checkinvoice (background) error: %s", e, exc_info=True)
-        send_seatalk_group_message(group_id, f"❌ Lỗi khi kiểm tra hoá đơn: {str(e)}")
+        send_seatalk_group_message(group_id, f"❌ Lỗi khi kiểm tra hoá đơn: {str(e)}", thread_id=thread_id)
 
 
 @app.post("/webhook")
@@ -435,6 +438,7 @@ async def seatalk_webhook(
     )
     media_info = ic.extract_media_info(message_obj)
     if media_info and media_group_id:
+        media_thread_id = message_obj.get("thread_id") or None
         try:
             token = get_seatalk_token()
             raw_bytes = ic.download_seatalk_media(media_info["url"], token)
@@ -443,8 +447,10 @@ async def seatalk_webhook(
             if ic.is_awaiting(media_group_id):
                 # Cách B: đang chờ ảnh sau lệnh !checkinvoice (reply trong thread)
                 # → phản hồi webhook NGAY (tránh SeaTalk timeout/retry), chạy OCR (chậm) ở nền,
-                # gửi kết quả vào group khi xong.
-                send_seatalk_group_message(media_group_id, "⏳ Đã nhận được file, đang kiểm tra hoá đơn — chờ chút nhé...")
+                # gửi kết quả vào group khi xong — trong cùng thread.
+                send_seatalk_group_message(
+                    media_group_id, "⏳ Đã nhận được file, đang kiểm tra hoá đơn — chờ chút nhé...", thread_id=media_thread_id
+                )
                 background_tasks.add_task(
                     run_invoice_check_and_reply,
                     media_group_id,
@@ -452,6 +458,7 @@ async def seatalk_webhook(
                     media_info["media_type"],
                     media_info["is_pdf"],
                     media_info.get("filename", "invoice"),
+                    media_thread_id,
                 )
                 ic.clear_awaiting(media_group_id)
                 ic.clear_pending_image(media_group_id)
