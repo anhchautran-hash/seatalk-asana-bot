@@ -224,6 +224,9 @@ def _word_diff(expected_tokens: list, got_tokens: list):
         got_part = " ".join(got_tokens[j1:j2])
         diffs.append((exp_part, got_part))
     return diffs
+
+
+def parse_comparison_result(comparison_result: str) -> dict:
     """
     Cố gắng đọc verdict Khớp/Không khớp mà chính hệ thống OCR nội bộ đã tự so (comparison_result),
     dùng làm lớp kiểm tra chéo — hệ thống này so khớp thông minh hơn (bắt được khác biệt từng từ
