@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import time
+from difflib import SequenceMatcher
 
 import httpx
 
@@ -207,7 +208,22 @@ def _clean_tokens(s: str) -> list:
     return [t for t in s.split() if t]
 
 
-def parse_comparison_result(comparison_result: str) -> dict:
+def _word_diff(expected_tokens: list, got_tokens: list):
+    """
+    So khớp CHẶT theo đúng vị trí trong câu (không chỉ đếm từ có/không) — tránh trường hợp
+    1 từ bị thay sai nhưng vẫn "còn tồn tại" ở vị trí khác trong câu nên bị bỏ sót
+    (VD: "Ngọc Hà" → "Ngọc Khánh" nhưng chữ "Hà" vẫn còn ở "Hà Nội" phía sau).
+    Trả về list các cặp (phần đúng, phần hoá đơn ghi) tại từng chỗ khác nhau.
+    """
+    sm = SequenceMatcher(None, expected_tokens, got_tokens)
+    diffs = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        exp_part = " ".join(expected_tokens[i1:i2])
+        got_part = " ".join(got_tokens[j1:j2])
+        diffs.append((exp_part, got_part))
+    return diffs
     """
     Cố gắng đọc verdict Khớp/Không khớp mà chính hệ thống OCR nội bộ đã tự so (comparison_result),
     dùng làm lớp kiểm tra chéo — hệ thống này so khớp thông minh hơn (bắt được khác biệt từng từ
@@ -262,10 +278,13 @@ def compare_invoice(extracted: dict) -> dict:
             counts["match"] += 1
         else:
             counts["mismatch"] += 1
-            missing_words = [t for t in exp_tokens if t not in got_tokens]
-            extra_words = [t for t in got_tokens if t not in exp_tokens]
-            if len(missing_words) == 1 and len(extra_words) == 1:
-                lines.append(f"❌ {label}: sửa \"{extra_words[0]}\" → \"{missing_words[0]}\"")
+            diffs = _word_diff(exp_tokens, got_tokens)
+            if len(diffs) == 1:
+                exp_part, got_part = diffs[0]
+                lines.append(f"❌ {label}: sửa \"{got_part}\" → \"{exp_part}\"")
+            elif diffs:
+                fixes = "; ".join(f"\"{g}\" → \"{e}\"" for e, g in diffs)
+                lines.append(f"❌ {label}: sửa {fixes}")
             else:
                 lines.append(f"❌ {label}: cần \"{expected}\"\n    Hoá đơn ghi: \"{got}\"")
 
