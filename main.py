@@ -450,9 +450,6 @@ async def seatalk_webhook(
                 # Cách B: đang chờ ảnh sau lệnh !checkinvoice (reply trong thread)
                 # → phản hồi webhook NGAY (tránh SeaTalk timeout/retry), chạy OCR (chậm) ở nền,
                 # gửi kết quả vào group khi xong — trong cùng thread.
-                send_seatalk_group_message(
-                    media_group_id, "⏳ Đã nhận được file, đang kiểm tra hoá đơn — chờ chút nhé...", thread_id=media_thread_id
-                )
                 background_tasks.add_task(
                     run_invoice_check_and_reply,
                     media_group_id,
@@ -572,7 +569,6 @@ async def seatalk_webhook(
         pending = ic.get_pending_image(group_id)
         if pending:
             # Đã có ảnh/PDF được cache sẵn (trường hợp hiếm) → chạy nền, trả lời webhook ngay
-            send_seatalk_group_message(group_id, "⏳ Đang kiểm tra hoá đơn — chờ chút nhé...")
             background_tasks.add_task(
                 run_invoice_check_and_reply,
                 group_id,
@@ -586,11 +582,13 @@ async def seatalk_webhook(
 
         # Chưa có ảnh nào — chờ người dùng REPLY (trong thread) vào tin nhắn này kèm ảnh/PDF
         ic.mark_awaiting(group_id)
+        checkinvoice_msg_id = message_obj.get("message_id") or None
         send_seatalk_group_message(
             group_id,
             "📎 Đã sẵn sàng kiểm tra hoá đơn!\n"
             "Hãy bấm REPLY (trả lời trong thread) vào đúng tin nhắn này, đính kèm ảnh/PDF hoá đơn nháp rồi gửi.\n"
             "Bot sẽ tự động kiểm tra ngay khi nhận được ảnh, không cần gõ lệnh lại.",
+            thread_id=checkinvoice_msg_id,
         )
         return {"ok": True}
 
