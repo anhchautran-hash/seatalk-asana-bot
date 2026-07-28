@@ -141,10 +141,12 @@ def send_seatalk_group_message(group_id: str, text: str, thread_id: str | None =
         "message": {"tag": "text", "text": {"content": text}},
     }
     if thread_id:
-        # LƯU Ý: chưa có tài liệu chính thức xác nhận tên field này — thử nghiệm theo suy đoán
-        # dựa trên field "thread_id" đã thấy ở tin nhắn nhận được. Nếu tin nhắn vẫn gửi ra ngoài
-        # thread (không nest), cần xem log phản hồi để điều chỉnh tên field cho đúng.
-        body["thread_id"] = thread_id
+        # LƯU Ý: chưa có tài liệu chính thức xác nhận cách gửi tin nhắn NEST vào 1 thread có sẵn.
+        # Thử "quoted_message_id" (field này xuất hiện khi bot NHẬN tin nhắn, nên có khả năng
+        # cũng được chấp nhận khi GỬI để tạo dạng quote/reply). Nếu vẫn không nest được, khả năng
+        # cao SeaTalk không cho phép bot chủ động gửi vào thread có sẵn qua API này — chỉ người
+        # dùng thật mới tạo/trả lời thread được qua giao diện. Xem log "SeaTalk send → ..." để kiểm tra.
+        body["message"]["quoted_message_id"] = thread_id
     resp = httpx.post(
         "https://openapi.seatalk.io/messaging/v2/group_chat",
         headers={"Authorization": f"Bearer {token}"},
