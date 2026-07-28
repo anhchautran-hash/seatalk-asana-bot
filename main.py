@@ -21,7 +21,7 @@ import re
 import difflib
 import httpx
 from datetime import datetime
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 
 import invoice_checker as ic
 
@@ -376,9 +376,23 @@ def extract_text_and_group(event: dict) -> tuple[str, str]:
     return text, group_id
 
 
+def run_invoice_check_and_reply(group_id: str, b64_data: str, media_type: str, is_pdf: bool, filename: str = "invoice"):
+    """Gọi workflow OCR nội bộ + so khớp trong background, gửi kết quả vào group khi xong."""
+    try:
+        extracted = ic.extract_invoice_data(b64_data, media_type, is_pdf, filename)
+        result = ic.compare_invoice(extracted)
+        msg = ic.format_result_message(result)
+        send_seatalk_group_message(group_id, msg)
+        log.info("checkinvoice (background) done for group %s", group_id)
+    except Exception as e:
+        log.error("checkinvoice (background) error: %s", e, exc_info=True)
+        send_seatalk_group_message(group_id, f"❌ Lỗi khi kiểm tra hoá đơn: {str(e)}")
+
+
 @app.post("/webhook")
 async def seatalk_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_seatalk_timestamp: str = Header(None),
     x_seatalk_signature: str = Header(None),
 ):
@@ -427,21 +441,25 @@ async def seatalk_webhook(
             b64 = base64.b64encode(raw_bytes).decode()
 
             if ic.is_awaiting(media_group_id):
-                # Cách B: đang chờ ảnh sau lệnh !checkinvoice (reply trong thread) → chạy kiểm tra ngay
-                try:
-                    extracted = ic.extract_invoice_data(b64, media_info["media_type"], media_info["is_pdf"])
-                    result = ic.compare_invoice(extracted)
-                    msg = ic.format_result_message(result)
-                    send_seatalk_group_message(media_group_id, msg)
-                    log.info("checkinvoice (auto, thread reply) done for group %s", media_group_id)
-                except Exception as e:
-                    log.error("checkinvoice (auto) error: %s", e, exc_info=True)
-                    send_seatalk_group_message(media_group_id, f"❌ Lỗi khi kiểm tra hoá đơn: {str(e)}")
+                # Cách B: đang chờ ảnh sau lệnh !checkinvoice (reply trong thread)
+                # → phản hồi webhook NGAY (tránh SeaTalk timeout/retry), chạy OCR (chậm) ở nền,
+                # gửi kết quả vào group khi xong.
+                send_seatalk_group_message(media_group_id, "⏳ Đã nhận được file, đang kiểm tra hoá đơn — chờ chút nhé...")
+                background_tasks.add_task(
+                    run_invoice_check_and_reply,
+                    media_group_id,
+                    b64,
+                    media_info["media_type"],
+                    media_info["is_pdf"],
+                    media_info.get("filename", "invoice"),
+                )
                 ic.clear_awaiting(media_group_id)
                 ic.clear_pending_image(media_group_id)
             else:
                 # Fallback: chưa có lệnh !checkinvoice nào đang chờ — chỉ cache lại để dùng nếu gõ lệnh sau
-                ic.store_pending_image(media_group_id, b64, media_info["media_type"], media_info["is_pdf"])
+                ic.store_pending_image(
+                    media_group_id, b64, media_info["media_type"], media_info["is_pdf"], media_info.get("filename", "invoice")
+                )
                 log.info("Cached invoice image for group %s (no pending !checkinvoice)", media_group_id)
         except Exception as e:
             log.error("Could not download invoice media: %s", e, exc_info=True)
@@ -536,17 +554,17 @@ async def seatalk_webhook(
     if stripped.lower().startswith("!checkinvoice"):
         pending = ic.get_pending_image(group_id)
         if pending:
-            # Đã có ảnh/PDF được cache sẵn (trường hợp hiếm) → kiểm tra luôn
-            try:
-                extracted = ic.extract_invoice_data(pending["base64"], pending["media_type"], pending["is_pdf"])
-                result = ic.compare_invoice(extracted)
-                msg = ic.format_result_message(result)
-                send_seatalk_group_message(group_id, msg)
-                ic.clear_pending_image(group_id)
-                log.info("checkinvoice done for group %s", group_id)
-            except Exception as e:
-                log.error("checkinvoice error: %s", e, exc_info=True)
-                send_seatalk_group_message(group_id, f"❌ Lỗi khi kiểm tra hoá đơn: {str(e)}")
+            # Đã có ảnh/PDF được cache sẵn (trường hợp hiếm) → chạy nền, trả lời webhook ngay
+            send_seatalk_group_message(group_id, "⏳ Đang kiểm tra hoá đơn — chờ chút nhé...")
+            background_tasks.add_task(
+                run_invoice_check_and_reply,
+                group_id,
+                pending["base64"],
+                pending["media_type"],
+                pending["is_pdf"],
+                pending.get("filename", "invoice"),
+            )
+            ic.clear_pending_image(group_id)
             return {"ok": True}
 
         # Chưa có ảnh nào — chờ người dùng REPLY (trong thread) vào tin nhắn này kèm ảnh/PDF
