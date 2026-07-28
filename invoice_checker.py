@@ -32,7 +32,6 @@ import logging
 import os
 import re
 import time
-from difflib import SequenceMatcher
 
 import httpx
 
@@ -201,13 +200,45 @@ def _normalize(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
 
 
-def _similarity(a: str, b: str) -> float:
-    return SequenceMatcher(None, _normalize(a), _normalize(b)).ratio()
+def _clean_tokens(s: str) -> list:
+    """Chuẩn hoá CHẶT: hạ chữ thường, bỏ dấu câu, tách từ — dùng để so khớp chính xác từng từ."""
+    s = (s or "").lower()
+    s = re.sub(r"[^\w\s]", " ", s, flags=re.UNICODE)
+    return [t for t in s.split() if t]
+
+
+def parse_comparison_result(comparison_result: str) -> dict:
+    """
+    Cố gắng đọc verdict Khớp/Không khớp mà chính hệ thống OCR nội bộ đã tự so (comparison_result),
+    dùng làm lớp kiểm tra chéo — hệ thống này so khớp thông minh hơn (bắt được khác biệt từng từ
+    trong câu dài), nên nếu nó báo "không khớp" thì ưu tiên tin theo, dù bên mình có thể tính khác.
+    """
+    result = {}
+    label_map = [
+        ("tên người mua", "ten_don_vi"),
+        ("tên đơn vị", "ten_don_vi"),
+        ("mst người mua", "mst"),
+        ("mã số thuế", "mst"),
+        ("địa chỉ người mua", "dia_chi"),
+        ("địa chỉ", "dia_chi"),
+    ]
+    for line in (comparison_result or "").split("\n"):
+        line_low = line.lower()
+        for label_text, field_key in label_map:
+            if field_key in result:
+                continue
+            if label_text in line_low:
+                if "không khớp" in line_low:
+                    result[field_key] = False
+                elif "khớp" in line_low:
+                    result[field_key] = True
+    return result
 
 
 def compare_invoice(extracted: dict) -> dict:
     lines = []
     counts = {"match": 0, "mismatch": 0, "missing": 0}
+    parsed_verdict = parse_comparison_result(extracted.get("comparison_result", ""))
 
     for field_key in ("ten_don_vi", "dia_chi"):
         label, _default = FIELDS[field_key]
@@ -217,13 +248,27 @@ def compare_invoice(extracted: dict) -> dict:
             counts["missing"] += 1
             lines.append(f"⚠️ {label}: cần \"{expected}\" — hệ thống OCR không đọc được")
             continue
-        score = _similarity(got, expected)
-        if score >= 0.85:
+
+        exp_tokens = _clean_tokens(expected)
+        got_tokens = _clean_tokens(got)
+        strict_match = exp_tokens == got_tokens
+
+        # Kiểm tra chéo với verdict của chính hệ thống OCR nội bộ (nếu đọc được) — 1 trong 2
+        # báo sai lệch thì kết luận cuối là sai lệch, để ưu tiên an toàn/chính xác.
+        cross_check = parsed_verdict.get(field_key)
+        final_match = strict_match and (cross_check is not False)
+
+        if final_match:
             counts["match"] += 1
             lines.append(f"✅ {label}: khớp (\"{got}\")")
         else:
             counts["mismatch"] += 1
-            lines.append(f"❌ {label}: cần \"{expected}\"\n    Hoá đơn ghi: \"{got}\"")
+            missing_words = [t for t in exp_tokens if t not in got_tokens]
+            extra_words = [t for t in got_tokens if t not in exp_tokens]
+            diff_note = ""
+            if missing_words or extra_words:
+                diff_note = f"\n    Khác biệt: thiếu {missing_words or '(không)'}, thừa/khác {extra_words or '(không)'}"
+            lines.append(f"❌ {label}: cần \"{expected}\"\n    Hoá đơn ghi: \"{got}\"{diff_note}")
 
     expected_mst = get_field_value("mst")
     expected_mst_digits = re.sub(r"[^\d]", "", expected_mst)
@@ -232,7 +277,7 @@ def compare_invoice(extracted: dict) -> dict:
     if not got_mst_digits:
         counts["missing"] += 1
         lines.append(f"⚠️ Mã số thuế: cần \"{expected_mst}\" — hệ thống OCR không đọc được")
-    elif expected_mst_digits and expected_mst_digits == got_mst_digits:
+    elif expected_mst_digits and expected_mst_digits == got_mst_digits and parsed_verdict.get("mst") is not False:
         counts["match"] += 1
         lines.append(f"✅ Mã số thuế: khớp ({got_mst})")
     else:
