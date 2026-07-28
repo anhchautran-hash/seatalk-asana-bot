@@ -5,8 +5,13 @@ Khi thành viên gõ trong group SeaTalk:
     !task [Section] Nội dung task
 
 Bot sẽ tự động tạo task đó vào đúng section trong Asana project Partnership.
+
+Ngoài ra còn có tính năng !checkinvoice: gửi ảnh/PDF hoá đơn nháp vào group rồi gõ
+!checkinvoice để bot đối chiếu 3 thông tin cố định của bên mua (Tên đơn vị, Địa chỉ,
+Mã số thuế) — xem chi tiết trong invoice_checker.py.
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -17,6 +22,8 @@ import difflib
 import httpx
 from datetime import datetime
 from fastapi import FastAPI, Header, HTTPException, Request
+
+import invoice_checker as ic
 
 # ─── Cấu hình ────────────────────────────────────────────────────────────────
 
@@ -402,17 +409,45 @@ async def seatalk_webhook(
 
     log.info("Event type: [%s]", event_type)
 
+    # ─── Ảnh/PDF hoá đơn nháp: lưu tạm để chờ lệnh !checkinvoice ──────────────
+    message_obj = event.get("message", {})
+    group_obj = event.get("group", {}) if isinstance(event.get("group", {}), dict) else {}
+    media_group_id = (
+        safe_str(group_obj.get("group_id"))
+        or safe_str(group_obj.get("id"))
+        or safe_str(event.get("group_id"))
+        or ""
+    )
+    media_info = ic.extract_media_info(message_obj)
+    if media_info and media_group_id:
+        try:
+            token = get_seatalk_token()
+            raw_bytes = ic.download_seatalk_media(media_info["url"], token)
+            b64 = base64.b64encode(raw_bytes).decode()
+            ic.store_pending_image(media_group_id, b64, media_info["media_type"], media_info["is_pdf"])
+            log.info("Cached invoice image for group %s", media_group_id)
+        except Exception as e:
+            log.error("Could not download invoice media: %s", e, exc_info=True)
+        return {"ok": True}
+
     text, group_id = extract_text_and_group(event)
 
     is_known_message_event = event_type in MESSAGE_EVENT_TYPES
     has_task_command = "!task" in text.lower()
     has_report_command = "!report" in text.lower()
+    has_checkinvoice_command = "!checkinvoice" in text.lower()
+    has_setref_command = "!setref" in text.lower()
 
-    if not is_known_message_event and not has_task_command and not has_report_command:
+    if (
+        not is_known_message_event
+        and not has_task_command
+        and not has_report_command
+        and not has_checkinvoice_command
+        and not has_setref_command
+    ):
         log.info("Skipping event_type=%s", event_type)
         return {"ok": True}
 
-    message_obj = event.get("message", {})
     sender_obj = message_obj.get("sender", {}) or event.get("sender", {})
     sender_seatalk_id = str(sender_obj.get("seatalk_id", "") or "")
     sender_name = sender_obj.get("name", "") or event.get("sender", {}).get("name", "") or "Thành viên"
@@ -478,6 +513,46 @@ async def seatalk_webhook(
         except Exception as e:
             log.error("Error sending report: %s", e, exc_info=True)
             send_seatalk_group_message(group_id, f"❌ Lỗi: {str(e)}")
+        return {"ok": True}
+
+    # Lệnh !checkinvoice — đối chiếu hoá đơn nháp với thông tin cố định bên mua
+    if stripped.lower().startswith("!checkinvoice"):
+        pending = ic.get_pending_image(group_id)
+        if not pending:
+            send_seatalk_group_message(
+                group_id,
+                "⚠️ Chưa thấy ảnh/PDF hoá đơn nào mới gửi trong group (trong 10 phút gần đây). "
+                "Gửi ảnh/PDF trước rồi gõ lại !checkinvoice.",
+            )
+            return {"ok": True}
+        try:
+            extracted = ic.extract_invoice_data(pending["base64"], pending["media_type"], pending["is_pdf"])
+            result = ic.compare_invoice(extracted)
+            msg = ic.format_result_message(result)
+            send_seatalk_group_message(group_id, msg)
+            ic.clear_pending_image(group_id)
+            log.info("checkinvoice done for group %s", group_id)
+        except Exception as e:
+            log.error("checkinvoice error: %s", e, exc_info=True)
+            send_seatalk_group_message(group_id, f"❌ Lỗi khi kiểm tra hoá đơn: {str(e)}")
+        return {"ok": True}
+
+    # Lệnh !setref — ghi đè tạm 1 trường tham chiếu (mất khi bot restart)
+    if stripped.lower().startswith("!setref"):
+        parsed = ic.parse_setref(stripped)
+        if not parsed:
+            send_seatalk_group_message(
+                group_id,
+                "⚠️ Cú pháp: !setref <field>=<value>\nCác field hợp lệ: ten_don_vi, dia_chi, mst",
+            )
+            return {"ok": True}
+        field, value = parsed
+        ic.set_override(field, value)
+        send_seatalk_group_message(
+            group_id,
+            f"✅ Đã ghi đè tạm: {field} = {value}\n"
+            f"(Chỉ tồn tại đến khi bot restart — sửa hằng số EXPECTED_* trong invoice_checker.py để lưu vĩnh viễn.)",
+        )
         return {"ok": True}
 
     # Lệnh !task
