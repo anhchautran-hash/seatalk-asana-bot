@@ -9,17 +9,19 @@ Chỉ kiểm tra 3 thông tin cố định của bên mua (Garena) trên hoá đ
   - Địa chỉ
   - Mã số thuế
 
-Luồng dùng trong SeaTalk group:
-  1) Thành viên gửi ẢNH hoặc FILE PDF hoá đơn nháp vào group.
-  2) Gõ: !checkinvoice
-  3) Bot đọc chữ trên hoá đơn bằng Tesseract OCR (chạy local, miễn phí), so với
-     3 thông tin cố định bên dưới, trả lời ✅ khớp / ❌ sai lệch cho từng mục.
+LUỒNG DÙNG (Cách B — qua thread reply, vì SeaTalk chỉ gửi webhook cho bot khi có mention
+hoặc khi tin nhắn nằm trong 1 thread mà bot đã từng được mention trước đó):
+
+  1) Gõ: @AsaPNS !checkinvoice
+  2) Bot trả lời, yêu cầu REPLY (trả lời trong thread) vào đúng tin nhắn đó kèm ảnh/PDF.
+  3) Bạn bấm Reply vào tin nhắn của bot, đính kèm ảnh/PDF hoá đơn, gửi.
+  4) Bot tự nhận diện ảnh/PDF trong thread đó và chạy kiểm tra ngay, không cần gõ lệnh lại.
 
 Muốn sửa thông tin cố định: sửa trực tiếp 3 hằng số EXPECTED_* bên dưới rồi deploy lại,
 hoặc dùng lệnh nhanh (không cần deploy lại, nhưng sẽ mất khi bot restart):
   !setref ten_don_vi=... | !setref dia_chi=... | !setref mst=...
 
-LƯU Ý: cần cài thêm gói hệ thống tesseract-ocr (+ gói ngôn ngữ tiếng Việt) và poppler-utils
+Cần cài thêm gói hệ thống tesseract-ocr (+ gói ngôn ngữ tiếng Việt) và poppler-utils
 (để đọc PDF) — xem Dockerfile đính kèm. Không cần env var nào cả.
 """
 
@@ -49,10 +51,13 @@ FIELDS = {
 
 OCR_LANGS = "vie+eng"  # cần đã cài gói ngôn ngữ tesseract-ocr-vie
 
-# ─── Cache ảnh chờ kiểm tra (gửi ảnh trước, gõ lệnh sau) ───────────────────
+# ─── Cache ảnh chờ kiểm tra ─────────────────────────────────────────────────
 
 _pending_images = {}  # group_id -> {"base64":..., "media_type":..., "is_pdf":..., "ts":...}
 PENDING_IMAGE_TTL = 600  # 10 phút
+
+_awaiting_check = {}  # group_id -> ts (đang chờ ảnh sau khi gõ !checkinvoice)
+AWAITING_TTL = 900  # 15 phút
 
 _ref_overrides = {}  # field_key -> value ghi đè tạm qua !setref (mất khi bot restart)
 
@@ -88,6 +93,24 @@ def get_pending_image(group_id: str) -> dict | None:
 
 def clear_pending_image(group_id: str):
     _pending_images.pop(group_id, None)
+
+
+def mark_awaiting(group_id: str):
+    _awaiting_check[group_id] = time.time()
+
+
+def is_awaiting(group_id: str) -> bool:
+    ts = _awaiting_check.get(group_id)
+    if not ts:
+        return False
+    if time.time() - ts > AWAITING_TTL:
+        _awaiting_check.pop(group_id, None)
+        return False
+    return True
+
+
+def clear_awaiting(group_id: str):
+    _awaiting_check.pop(group_id, None)
 
 
 # ─── Tải ảnh/file từ SeaTalk ─────────────────────────────────────────────────
@@ -188,7 +211,6 @@ def compare_invoice(extracted: dict) -> dict:
     lines = []
     counts = {"match": 0, "mismatch": 0}
 
-    # Tên đơn vị & Địa chỉ: so khớp tương đối (fuzzy) vì OCR có thể lệch vài ký tự
     for field_key in ("ten_don_vi", "dia_chi"):
         label, _default = FIELDS[field_key]
         expected = get_field_value(field_key)
@@ -199,7 +221,6 @@ def compare_invoice(extracted: dict) -> dict:
             counts["mismatch"] += 1
             lines.append(f"❌ {label}: KHÔNG tìm thấy \"{expected}\" trên hoá đơn (hoặc OCR đọc chưa rõ)")
 
-    # Mã số thuế: so khớp chuỗi số (bỏ hết ký tự không phải số 2 bên rồi so)
     expected_mst = get_field_value("mst")
     expected_mst_digits = re.sub(r"[^\d]", "", expected_mst)
     if expected_mst_digits and expected_mst_digits in raw_digits:
