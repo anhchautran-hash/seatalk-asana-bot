@@ -201,28 +201,32 @@ def _normalize(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
 
 
-def _clean_tokens(s: str) -> list:
-    """Chuẩn hoá CHẶT: hạ chữ thường, bỏ dấu câu, tách từ — dùng để so khớp chính xác từng từ."""
-    s = (s or "").lower()
-    s = re.sub(r"[^\w\s]", " ", s, flags=re.UNICODE)
-    return [t for t in s.split() if t]
+def _tokenize_pair(s: str):
+    """Trả về (tokens viết thường để so sánh, tokens giữ nguyên hoa/thường để hiển thị)."""
+    cleaned = re.sub(r"[^\w\s]", " ", s or "", flags=re.UNICODE)
+    display = [t for t in cleaned.split() if t]
+    lower = [t.lower() for t in display]
+    return lower, display
 
 
-def _word_diff(expected_tokens: list, got_tokens: list):
+def _word_diff(exp_lower: list, got_lower: list, exp_display: list, got_display: list):
     """
     So khớp CHẶT theo đúng vị trí trong câu (không chỉ đếm từ có/không) — tránh trường hợp
     1 từ bị thay sai nhưng vẫn "còn tồn tại" ở vị trí khác trong câu nên bị bỏ sót
     (VD: "Ngọc Hà" → "Ngọc Khánh" nhưng chữ "Hà" vẫn còn ở "Hà Nội" phía sau).
-    Trả về list các cặp (phần đúng, phần hoá đơn ghi) tại từng chỗ khác nhau.
+    Kèm thêm 1 từ phía trước làm ngữ cảnh để dễ đọc hơn (VD: "Ngọc Khánh" → "Ngọc Hà"
+    thay vì chỉ "Khánh" → "Hà" trơ trọi).
+    Trả về list các cặp (phần hoá đơn ghi, phần đúng) tại từng chỗ khác nhau.
     """
-    sm = SequenceMatcher(None, expected_tokens, got_tokens)
+    sm = SequenceMatcher(None, exp_lower, got_lower)
     diffs = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             continue
-        exp_part = " ".join(expected_tokens[i1:i2])
-        got_part = " ".join(got_tokens[j1:j2])
-        diffs.append((exp_part, got_part))
+        ei1, gj1 = max(0, i1 - 1), max(0, j1 - 1)
+        exp_part = " ".join(exp_display[ei1:i2])
+        got_part = " ".join(got_display[gj1:j2])
+        diffs.append((got_part, exp_part))
     return diffs
 
 
@@ -268,9 +272,9 @@ def compare_invoice(extracted: dict) -> dict:
             lines.append(f"⚠️ {label}: không đọc được (cần \"{expected}\")")
             continue
 
-        exp_tokens = _clean_tokens(expected)
-        got_tokens = _clean_tokens(got)
-        strict_match = exp_tokens == got_tokens
+        exp_lower, exp_display = _tokenize_pair(expected)
+        got_lower, got_display = _tokenize_pair(got)
+        strict_match = exp_lower == got_lower
 
         # Kiểm tra chéo với verdict của chính hệ thống OCR nội bộ (nếu đọc được) — 1 trong 2
         # báo sai lệch thì kết luận cuối là sai lệch, để ưu tiên an toàn/chính xác.
@@ -281,12 +285,12 @@ def compare_invoice(extracted: dict) -> dict:
             counts["match"] += 1
         else:
             counts["mismatch"] += 1
-            diffs = _word_diff(exp_tokens, got_tokens)
+            diffs = _word_diff(exp_lower, got_lower, exp_display, got_display)
             if len(diffs) == 1:
-                exp_part, got_part = diffs[0]
+                got_part, exp_part = diffs[0]
                 lines.append(f"❌ {label}: sửa \"{got_part}\" → \"{exp_part}\"")
             elif diffs:
-                fixes = "; ".join(f"\"{g}\" → \"{e}\"" for e, g in diffs)
+                fixes = "; ".join(f"\"{g}\" → \"{e}\"" for g, e in diffs)
                 lines.append(f"❌ {label}: sửa {fixes}")
             else:
                 lines.append(f"❌ {label}: cần \"{expected}\"\n    Hoá đơn ghi: \"{got}\"")
