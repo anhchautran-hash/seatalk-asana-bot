@@ -246,7 +246,7 @@ def compare_invoice(extracted: dict) -> dict:
         got = extracted.get(field_key, "")
         if not got:
             counts["missing"] += 1
-            lines.append(f"⚠️ {label}: cần \"{expected}\" — hệ thống OCR không đọc được")
+            lines.append(f"⚠️ {label}: không đọc được (cần \"{expected}\")")
             continue
 
         exp_tokens = _clean_tokens(expected)
@@ -260,15 +260,14 @@ def compare_invoice(extracted: dict) -> dict:
 
         if final_match:
             counts["match"] += 1
-            lines.append(f"✅ {label}: khớp (\"{got}\")")
         else:
             counts["mismatch"] += 1
             missing_words = [t for t in exp_tokens if t not in got_tokens]
             extra_words = [t for t in got_tokens if t not in exp_tokens]
-            diff_note = ""
-            if missing_words or extra_words:
-                diff_note = f"\n    Khác biệt: thiếu {missing_words or '(không)'}, thừa/khác {extra_words or '(không)'}"
-            lines.append(f"❌ {label}: cần \"{expected}\"\n    Hoá đơn ghi: \"{got}\"{diff_note}")
+            if len(missing_words) == 1 and len(extra_words) == 1:
+                lines.append(f"❌ {label}: sửa \"{extra_words[0]}\" → \"{missing_words[0]}\"")
+            else:
+                lines.append(f"❌ {label}: cần \"{expected}\"\n    Hoá đơn ghi: \"{got}\"")
 
     expected_mst = get_field_value("mst")
     expected_mst_digits = re.sub(r"[^\d]", "", expected_mst)
@@ -276,30 +275,22 @@ def compare_invoice(extracted: dict) -> dict:
     got_mst_digits = re.sub(r"[^\d]", "", got_mst)
     if not got_mst_digits:
         counts["missing"] += 1
-        lines.append(f"⚠️ Mã số thuế: cần \"{expected_mst}\" — hệ thống OCR không đọc được")
+        lines.append(f"⚠️ Mã số thuế: không đọc được (cần \"{expected_mst}\")")
     elif expected_mst_digits and expected_mst_digits == got_mst_digits and parsed_verdict.get("mst") is not False:
         counts["match"] += 1
-        lines.append(f"✅ Mã số thuế: khớp ({got_mst})")
     else:
         counts["mismatch"] += 1
-        lines.append(f"❌ Mã số thuế: cần \"{expected_mst}\" — hoá đơn ghi \"{got_mst}\"")
+        lines.append(f"❌ Mã số thuế: sửa \"{got_mst}\" → \"{expected_mst}\"")
 
-    return {"lines": lines, "counts": counts, "comparison_result": extracted.get("comparison_result", "")}
+    return {"lines": lines, "counts": counts}
 
 
 def format_result_message(result: dict) -> str:
     c = result["counts"]
-    overall = (
-        "✅ ĐÃ KHỚP — có thể duyệt"
-        if c["mismatch"] == 0 and c["missing"] == 0
-        else "🔴 CẦN KIỂM TRA LẠI trước khi duyệt"
-    )
-    summary = f"({c['match']} khớp · {c['mismatch']} sai lệch · {c['missing']} thiếu)\n\n"
+    if c["mismatch"] == 0 and c["missing"] == 0:
+        return "✅ Đối chiếu hoá đơn: KHỚP — có thể duyệt."
     body = "\n".join(result["lines"])
-    extra = ""
-    if result.get("comparison_result"):
-        extra = f"\n\n(Ghi chú thêm từ hệ thống OCR nội bộ: {result['comparison_result']})"
-    return f"📋 Đối chiếu thông tin đơn vị mua trên hoá đơn\n{overall}\n{summary}{body}{extra}"
+    return f"🔴 Đối chiếu hoá đơn: CẦN SỬA\n{body}"
 
 
 # ─── Parse lệnh ─────────────────────────────────────────────────────────────
