@@ -171,10 +171,12 @@ def extract_invoice_data(b64_data: str, media_type: str, is_pdf: bool) -> dict:
 
     if is_pdf:
         try:
-            pages = convert_from_bytes(raw_bytes, dpi=200)
+            # Chỉ render trang 1 ở độ phân giải vừa phải để tránh tràn RAM
+            # (gói Free trên Render thường giới hạn RAM rất thấp).
+            pages = convert_from_bytes(raw_bytes, dpi=150, first_page=1, last_page=1)
         except Exception as e:
             raise RuntimeError(f"Không đọc được file PDF: {e}")
-        for page in pages[:3]:  # chỉ đọc tối đa 3 trang đầu cho nhanh
+        for page in pages:
             texts.append(pytesseract.image_to_string(page, lang=OCR_LANGS))
     else:
         try:
