@@ -1,8 +1,9 @@
 """
 invoice_checker.py
 ===================
-Tính năng !checkinvoice cho bot AsaPNS — bản dùng OCR miễn phí (Tesseract),
-KHÔNG cần API key Anthropic hay bất kỳ tài khoản trả phí nào.
+Tính năng !checkinvoice cho bot AsaPNS — dùng workflow OCR nội bộ tại ai.insea.io
+(workflow "OCR", API: POST https://ai.insea.io/api/workflows/25086/run) thay vì
+Tesseract, chính xác hơn nhiều vì workflow này tự tách sẵn tên đơn vị / MST / địa chỉ.
 
 Chỉ kiểm tra 3 thông tin cố định của bên mua (Garena) trên hoá đơn nháp:
   - Tên đơn vị
@@ -15,26 +16,25 @@ hoặc khi tin nhắn nằm trong 1 thread mà bot đã từng được mention 
   1) Gõ: @AsaPNS !checkinvoice
   2) Bot trả lời, yêu cầu REPLY (trả lời trong thread) vào đúng tin nhắn đó kèm ảnh/PDF.
   3) Bạn bấm Reply vào tin nhắn của bot, đính kèm ảnh/PDF hoá đơn, gửi.
-  4) Bot tự nhận diện ảnh/PDF trong thread đó và chạy kiểm tra ngay, không cần gõ lệnh lại.
+  4) Bot phản hồi ngay "đang kiểm tra", rồi gọi workflow OCR ở nền và gửi kết quả khi xong.
 
 Muốn sửa thông tin cố định: sửa trực tiếp 3 hằng số EXPECTED_* bên dưới rồi deploy lại,
 hoặc dùng lệnh nhanh (không cần deploy lại, nhưng sẽ mất khi bot restart):
   !setref ten_don_vi=... | !setref dia_chi=... | !setref mst=...
 
-Cần cài thêm gói hệ thống tesseract-ocr (+ gói ngôn ngữ tiếng Việt) và poppler-utils
-(để đọc PDF) — xem Dockerfile đính kèm. Không cần env var nào cả.
+Cần cấu hình (env var trên Render):
+  INSEA_OCR_API_KEY   - API key của workflow "OCR" trên ai.insea.io
+                         (Integrate → API Access → Manage API Keys)
 """
 
 import base64
-import io
 import logging
+import os
 import re
 import time
-import unicodedata
+from difflib import SequenceMatcher
 
-from PIL import Image
-import pytesseract
-from pdf2image import convert_from_bytes
+import httpx
 
 log = logging.getLogger(__name__)
 
@@ -50,11 +50,14 @@ FIELDS = {
     "mst": ("Mã số thuế", EXPECTED_MST),
 }
 
-OCR_LANGS = "vie+eng"  # cần đã cài gói ngôn ngữ tesseract-ocr-vie
+# ─── Cấu hình workflow OCR nội bộ (ai.insea.io) ────────────────────────────
+
+INSEA_OCR_API_URL = "https://ai.insea.io/api/workflows/25086/run"
+INSEA_OCR_API_KEY = os.environ.get("INSEA_OCR_API_KEY", "")
 
 # ─── Cache ảnh chờ kiểm tra ─────────────────────────────────────────────────
 
-_pending_images = {}  # group_id -> {"base64":..., "media_type":..., "is_pdf":..., "ts":...}
+_pending_images = {}  # group_id -> {"base64":..., "media_type":..., "is_pdf":..., "filename":..., "ts":...}
 PENDING_IMAGE_TTL = 600  # 10 phút
 
 _awaiting_check = {}  # group_id -> ts (đang chờ ảnh sau khi gõ !checkinvoice)
@@ -73,11 +76,12 @@ def set_override(field_key: str, value: str):
     _ref_overrides[field_key] = value
 
 
-def store_pending_image(group_id: str, b64_data: str, media_type: str, is_pdf: bool):
+def store_pending_image(group_id: str, b64_data: str, media_type: str, is_pdf: bool, filename: str = "invoice"):
     _pending_images[group_id] = {
         "base64": b64_data,
         "media_type": media_type,
         "is_pdf": is_pdf,
+        "filename": filename,
         "ts": time.time(),
     }
 
@@ -117,13 +121,7 @@ def clear_awaiting(group_id: str):
 # ─── Tải ảnh/file từ SeaTalk ─────────────────────────────────────────────────
 
 def download_seatalk_media(url_or_key: str, seatalk_token: str) -> bytes:
-    """
-    LƯU Ý: main.py hiện đã log toàn bộ payload webhook. Khi test gửi thử 1 ảnh vào group,
-    xem log Render để biết chính xác field chứa URL ảnh và chỉnh extract_media_info()
-    bên dưới nếu cần. Hàm này giả định url_or_key là URL tải trực tiếp kèm Bearer token.
-    """
-    import httpx
-
+    """Xác nhận từ log thật: link tải nằm ở field "content", cần Bearer token của bot."""
     resp = httpx.get(
         url_or_key,
         headers={"Authorization": f"Bearer {seatalk_token}"},
@@ -135,7 +133,7 @@ def download_seatalk_media(url_or_key: str, seatalk_token: str) -> bytes:
 
 
 def extract_media_info(message: dict) -> dict | None:
-    """Trả về {"url":..., "is_pdf":bool, "media_type":...} nếu message này là ảnh/file.
+    """Trả về {"url":..., "is_pdf":bool, "media_type":..., "filename":...} nếu message này là ảnh/file.
 
     Xác nhận từ log thật (2026-07-28): SeaTalk trả link tải ở field "content", ví dụ:
       {"tag": "file", "file": {"content": "https://openapi.seatalk.io/messaging/v2/file/...", "filename": "Hoadon 9223.pdf"}}
@@ -148,141 +146,115 @@ def extract_media_info(message: dict) -> dict | None:
         obj = image_obj or {}
         url = obj.get("content") or obj.get("url") or obj.get("image_url") or obj.get("download_url")
         if url:
-            return {"url": url, "is_pdf": False, "media_type": "image/jpeg"}
+            return {"url": url, "is_pdf": False, "media_type": "image/jpeg", "filename": "invoice.jpg"}
 
     if tag == "file" or file_obj:
         obj = file_obj or {}
         url = obj.get("content") or obj.get("url") or obj.get("file_url") or obj.get("download_url")
-        filename = (obj.get("filename") or obj.get("name") or "").lower()
+        filename = obj.get("filename") or obj.get("name") or "invoice"
         if url:
-            is_pdf = filename.endswith(".pdf") or "pdf" in (obj.get("content_type", "") or "")
+            is_pdf = filename.lower().endswith(".pdf") or "pdf" in (obj.get("content_type", "") or "")
             return {
                 "url": url,
                 "is_pdf": is_pdf,
                 "media_type": "application/pdf" if is_pdf else obj.get("content_type", "application/octet-stream"),
+                "filename": filename,
             }
     return None
 
 
-# ─── OCR: đọc chữ trên hoá đơn (Tesseract, miễn phí, chạy local) ────────────
+# ─── Gọi workflow OCR nội bộ (ai.insea.io) ─────────────────────────────────
 
-def extract_invoice_data(b64_data: str, media_type: str, is_pdf: bool) -> dict:
+def extract_invoice_data(b64_data: str, media_type: str, is_pdf: bool, filename: str = "invoice") -> dict:
+    if not INSEA_OCR_API_KEY:
+        raise RuntimeError("Thiếu env var INSEA_OCR_API_KEY.")
+
     raw_bytes = base64.b64decode(b64_data)
-    texts = []
 
-    if is_pdf:
-        try:
-            # Chỉ render trang 1 ở độ phân giải vừa phải để tránh tràn RAM
-            # (gói Free trên Render thường giới hạn RAM rất thấp).
-            pages = convert_from_bytes(raw_bytes, dpi=150, first_page=1, last_page=1)
-        except Exception as e:
-            raise RuntimeError(f"Không đọc được file PDF: {e}")
-        for page in pages:
-            texts.append(pytesseract.image_to_string(page, lang=OCR_LANGS))
-    else:
-        try:
-            img = Image.open(io.BytesIO(raw_bytes))
-        except Exception as e:
-            raise RuntimeError(f"Không đọc được file ảnh: {e}")
-        texts.append(pytesseract.image_to_string(img, lang=OCR_LANGS))
+    resp = httpx.post(
+        INSEA_OCR_API_URL,
+        headers={"Authorization": f"Bearer {INSEA_OCR_API_KEY}"},
+        files={"invoice_file": (filename, raw_bytes, media_type)},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    log.info("insea.io OCR workflow response: %s", payload)
 
-    raw_text = "\n".join(texts)
-    log.info("OCR raw_text (%d ký tự): %s", len(raw_text), raw_text[:500])
-    return {"raw_text": raw_text}
+    data = payload.get("data", {})
+    if data.get("status") != "succeeded":
+        err = payload.get("error") or data.get("error") or "workflow không thành công"
+        raise RuntimeError(f"Workflow OCR lỗi: {err}")
+
+    outputs = data.get("outputs", {})
+    return {
+        "ten_don_vi": (outputs.get("customer_name") or "").strip(),
+        "dia_chi": (outputs.get("customer_address") or "").strip(),
+        "mst": (outputs.get("customer_tax_code") or "").strip(),
+        "comparison_result": (outputs.get("comparison_result") or "").strip(),
+    }
 
 
 # ─── So khớp ─────────────────────────────────────────────────────────────────
 
 def _normalize(s: str) -> str:
-    s = unicodedata.normalize("NFC", s or "")
-    return re.sub(r"\s+", " ", s.strip()).lower()
+    return re.sub(r"\s+", " ", (s or "").strip()).lower()
 
 
-def _tokens(s: str) -> list:
-    s = unicodedata.normalize("NFC", s or "")
-    return [t for t in re.findall(r"[^\W\d_]+", s.lower(), flags=re.UNICODE) if len(t) >= 2]
-
-
-def _fuzzy_contains(expected: str, text_norm: str, threshold: float = 0.8) -> bool:
-    """OCR có thể lệch vài ký tự/dấu câu — so theo % từ khớp thay vì so nguyên câu 1:1."""
-    toks = _tokens(expected)
-    if not toks:
-        return False
-    found = sum(1 for t in toks if t in text_norm)
-    return (found / len(toks)) >= threshold
-
-
-def _best_matching_line(expected: str, raw_text: str) -> tuple:
-    """
-    So khớp CHẶT HƠN: chỉ tính % từ khớp trong TỪNG DÒNG (hoặc 2 dòng liền kề gộp lại,
-    để không bị hỏng khi địa chỉ dài bị OCR ngắt xuống dòng) — không gộp cả văn bản,
-    để tránh trường hợp các từ trùng khớp bị "nhặt" rải rác từ nhiều dòng/trường khác nhau
-    (VD: dòng bên bán + dòng bên mua cộng lại vô tình đủ % từ).
-    Trả về (dòng khớp nhất, điểm khớp 0..1).
-    """
-    toks = _tokens(expected)
-    if not toks:
-        return "", 0.0
-    raw_lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
-    candidates = list(raw_lines)
-    for i in range(len(raw_lines) - 1):
-        candidates.append(f"{raw_lines[i]} {raw_lines[i + 1]}")
-
-    best_line, best_score = "", 0.0
-    for line in candidates:
-        line_norm = _normalize(line)
-        found = sum(1 for t in toks if t in line_norm)
-        score = found / len(toks)
-        if score > best_score:
-            best_score = score
-            best_line = line
-    return best_line, best_score
+def _similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, _normalize(a), _normalize(b)).ratio()
 
 
 def compare_invoice(extracted: dict) -> dict:
-    raw_text = extracted.get("raw_text", "")
-    raw_digits = re.sub(r"[^\d]", "", raw_text)
-
     lines = []
-    counts = {"match": 0, "mismatch": 0}
+    counts = {"match": 0, "mismatch": 0, "missing": 0}
 
-    # Tên đơn vị & Địa chỉ: so khớp CHẶT trong từng dòng (không gộp cả văn bản),
-    # ngưỡng cao hơn (75%) vì giờ đã so trong phạm vi 1 dòng nên khó bị "ăn may".
-    # Luôn hiển thị nguyên văn dòng OCR đọc được để tự kiểm tra lại bằng mắt.
     for field_key in ("ten_don_vi", "dia_chi"):
         label, _default = FIELDS[field_key]
         expected = get_field_value(field_key)
-        best_line, score = _best_matching_line(expected, raw_text)
-        threshold = 0.75
-        if score >= threshold:
+        got = extracted.get(field_key, "")
+        if not got:
+            counts["missing"] += 1
+            lines.append(f"⚠️ {label}: cần \"{expected}\" — hệ thống OCR không đọc được")
+            continue
+        score = _similarity(got, expected)
+        if score >= 0.85:
             counts["match"] += 1
-            lines.append(f"✅ {label}: khớp\n    OCR đọc: \"{best_line}\"")
+            lines.append(f"✅ {label}: khớp (\"{got}\")")
         else:
             counts["mismatch"] += 1
-            lines.append(
-                f"❌ {label}: cần \"{expected}\"\n"
-                f"    OCR đọc được (gần nhất): \"{best_line or '(không thấy dòng nào tương ứng)'}\""
-            )
+            lines.append(f"❌ {label}: cần \"{expected}\"\n    Hoá đơn ghi: \"{got}\"")
 
     expected_mst = get_field_value("mst")
     expected_mst_digits = re.sub(r"[^\d]", "", expected_mst)
-    if expected_mst_digits and expected_mst_digits in raw_digits:
+    got_mst = extracted.get("mst", "")
+    got_mst_digits = re.sub(r"[^\d]", "", got_mst)
+    if not got_mst_digits:
+        counts["missing"] += 1
+        lines.append(f"⚠️ Mã số thuế: cần \"{expected_mst}\" — hệ thống OCR không đọc được")
+    elif expected_mst_digits and expected_mst_digits == got_mst_digits:
         counts["match"] += 1
-        lines.append(f"✅ Mã số thuế: khớp ({expected_mst})")
+        lines.append(f"✅ Mã số thuế: khớp ({got_mst})")
     else:
         counts["mismatch"] += 1
-        lines.append(f"❌ Mã số thuế: KHÔNG tìm thấy \"{expected_mst}\" trên hoá đơn (hoặc OCR đọc chưa rõ)")
+        lines.append(f"❌ Mã số thuế: cần \"{expected_mst}\" — hoá đơn ghi \"{got_mst}\"")
 
-    return {"lines": lines, "counts": counts}
+    return {"lines": lines, "counts": counts, "comparison_result": extracted.get("comparison_result", "")}
 
 
 def format_result_message(result: dict) -> str:
     c = result["counts"]
-    overall = "✅ ĐÃ KHỚP — có thể duyệt" if c["mismatch"] == 0 else "🔴 CẦN KIỂM TRA LẠI trước khi duyệt"
-    summary = f"({c['match']} khớp · {c['mismatch']} sai lệch)\n\n"
+    overall = (
+        "✅ ĐÃ KHỚP — có thể duyệt"
+        if c["mismatch"] == 0 and c["missing"] == 0
+        else "🔴 CẦN KIỂM TRA LẠI trước khi duyệt"
+    )
+    summary = f"({c['match']} khớp · {c['mismatch']} sai lệch · {c['missing']} thiếu)\n\n"
     body = "\n".join(result["lines"])
-    note = "\n\n(Đọc bằng OCR miễn phí — nếu ảnh mờ/nghiêng có thể đọc sai, nên kiểm tra lại bằng mắt khi thấy ❌.)"
-    return f"📋 Đối chiếu thông tin đơn vị mua trên hoá đơn\n{overall}\n{summary}{body}{note}"
+    extra = ""
+    if result.get("comparison_result"):
+        extra = f"\n\n(Ghi chú thêm từ hệ thống OCR nội bộ: {result['comparison_result']})"
+    return f"📋 Đối chiếu thông tin đơn vị mua trên hoá đơn\n{overall}\n{summary}{body}{extra}"
 
 
 # ─── Parse lệnh ─────────────────────────────────────────────────────────────
